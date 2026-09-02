@@ -117,7 +117,7 @@ try {
     $env:Path = "$env:Path;$BinDir"
 
     & (Join-Path $BinDir 'veans.exe') version
-    & (Join-Path $BinDir 'marshal.exe') version
+    & (Join-Path $BinDir 'marshal.exe') --version
 
     Write-Host ''
     Write-Host 'Next: from inside the repository you want coordinated, run'

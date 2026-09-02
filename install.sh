@@ -138,7 +138,7 @@ case ":${PATH}:" in
 esac
 
 "${bindir}/veans" version || true
-"${bindir}/marshal" version || true
+"${bindir}/marshal" --version || true
 
 cat >&2 <<'NEXT'
 
