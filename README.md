@@ -11,27 +11,67 @@ every `SessionStart` and `PreCompact`, so context never goes stale.
 
 ## Quick start
 
+Install `veans` and `marshal`. The repository is private, so the installers
+need a GitHub token with `Contents: read` — or an authenticated `gh`.
+
 ```sh
-# 1. Build (or download) the binary
-cd veans && mage build && sudo install ./veans /usr/local/bin/
+# Linux and macOS (native builds for amd64 and arm64)
+GH_TOKEN=ghp_xxx sh -c "$(curl -fsSL https://raw.githubusercontent.com/EPYCD/veans/main/install.sh)"
+```
 
-# 2. In a repo with a Vikunja instance reachable
-veans init --server https://vikunja.example.com
+```powershell
+# Windows (native; no WSL required)
+$env:GH_TOKEN = "ghp_xxx"; iwr -useb https://raw.githubusercontent.com/EPYCD/veans/main/install.ps1 | iex
+```
 
-# 3. Wire it into Claude Code (.claude/settings.json):
+Then, from inside the repository you want coordinated:
+
+```sh
+veans onboard --server https://vikunja.example.com
+```
+
+One command and one login. It creates the project (or reuses one), the five
+canonical buckets, the agent bot and the two service bots, shares the project
+with each, mints their tokens, sets the receipt bot and claim bucket,
+registers the webhook, and writes `.veans.yml`, `.marshal.yml`,
+`.claude/settings.json`, `.mcp.json`, the four board workflows and the
+composite action they call. Nothing is overwritten without `--force`, so it
+is safe to re-run on a half-configured repository.
+
+Print the CI token it reports as the repository secret `WORKMAN_TOKEN`; the
+gates cannot close a task without it.
+
+<details>
+<summary>Doing it step by step instead</summary>
+
+```sh
+veans init --server https://vikunja.example.com   # board, bot, .veans.yml
+marshal init                                      # .marshal.yml
+marshal setup --token <admin token>               # service bots, webhook
+```
+
+`veans init` also offers to write the agent hooks itself. If you would rather
+paste them, Claude Code takes `.claude/settings.json`:
+
+```json
 {
   "hooks": {
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "veans prime" }] }],
     "PreCompact":   [{ "hooks": [{ "type": "command", "command": "veans prime" }] }]
   }
 }
+```
 
-# OpenCode (.opencode/plugin/veans-prime.ts):
+and OpenCode takes `.opencode/plugin/veans-prime.ts`:
+
+```ts
 export const VeansPrime = {
   event: ["session.start", "compact.before"],
   handler: async ({ exec }) => exec("veans prime"),
 }
 ```
+
+</details>
 
 `veans prime` exits silently with status 0 when no `.veans.yml` is reachable
 upward from cwd, so the hook is safe to install in a global `~/.claude/`

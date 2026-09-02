@@ -58,6 +58,7 @@ func Root(version string) *cobra.Command {
 	root.AddCommand(newPrimeCmd())
 	root.AddCommand(newAPICmd())
 	root.AddCommand(newLoginCmd())
+	root.AddCommand(newOnboardCmd())
 
 	return root
 }

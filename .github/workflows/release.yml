@@ -1,0 +1,117 @@
+# Builds veans and marshal for every supported platform, publishes them as a
+# GitHub Release, and pushes the marshal container image.
+#
+# Before this existed, ghcr.io/epycd/marshal:latest was pushed by hand and no
+# binaries were published at all — machines were provisioned by copying files
+# off the server. Tag a commit (v0.1.0) and everything below is reproducible.
+#
+# Windows is a real target: the module carries //go:build !unix file-locking
+# variants and uses wincred for the credential store.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. v0.1.0). Publishes a draft release."
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GO_VERSION: "1.27"
+
+jobs:
+  binaries:
+    name: Cross-compile and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Resolve version
+        id: v
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: go test -short ./...
+
+      # CGO stays off so every artifact is a static binary with no libc
+      # dependency. darwin/arm64 gets an ad-hoc signature from the Go
+      # linker automatically, which macOS requires of all arm64
+      # executables — without it the process is killed on launch.
+      - name: Build all targets
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+          for t in $targets; do
+            os="${t%/*}"; arch="${t#*/}"
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            stage="build/${os}_${arch}"
+            mkdir -p "$stage"
+            for c in veans marshal; do
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+                -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "${stage}/${c}${ext}" "./cmd/${c}"
+            done
+            if [ "$os" = "windows" ]; then
+              (cd "$stage" && zip -q "../../dist/veans_${VERSION}_${os}_${arch}.zip" veans.exe marshal.exe)
+            else
+              tar -czf "dist/veans_${VERSION}_${os}_${arch}.tar.gz" -C "$stage" veans marshal
+            fi
+            echo "built $t"
+          done
+          (cd dist && sha256sum * > checksums.txt)
+          ls -l dist
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.version }}
+          name: ${{ steps.v.outputs.version }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          generate_release_notes: true
+          files: dist/*
+
+  image:
+    name: Build and push the marshal image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/marshal
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.event.inputs.version || github.ref_name }}

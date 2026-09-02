@@ -25,8 +25,6 @@ import (
 	"github.com/spf13/cobra"
 
 	veansconfig "code.vikunja.io/veans/internal/config"
-	"code.vikunja.io/veans/internal/marshal/config"
-	"code.vikunja.io/veans/internal/marshal/refs"
 	"code.vikunja.io/veans/internal/output"
 )
 
@@ -63,43 +61,20 @@ every key is documented in veans/README.md.`,
 				return err
 			}
 			root := filepath.Dir(vpath)
-			target := filepath.Join(root, config.Filename)
-			if _, err := os.Stat(target); err == nil && !force {
-				return output.New(output.CodeConflict, "%s exists — pass --force to overwrite", target)
-			}
-
-			cfg := &config.Config{AppRoot: appRoot, Codeowners: codeown}
-			for _, spec := range specRefs {
-				prefix, file, ok := strings.Cut(spec, "=")
-				if !ok {
-					return output.New(output.CodeValidation, "--ref %q: expected PREFIX=path/to/file.md", spec)
-				}
-				cfg.References = append(cfg.References, refs.Source{Prefix: prefix, File: file})
-			}
-			if len(cfg.References) == 0 {
-				if prd != "" {
-					cfg.References = append(cfg.References, refs.Source{Prefix: "FR-", File: prd}, refs.Source{Prefix: "NFR-", File: prd})
-				}
-				if spine != "" {
-					cfg.References = append(cfg.References, refs.Source{Prefix: "AD-", File: spine})
-				}
-				if epics != "" {
-					cfg.References = append(cfg.References, refs.Source{Prefix: "D-", File: epics})
-				}
-			}
-			cfg.Pool.Databases = dbs
-			if ports != "" {
-				cfg.Pool.Ports, err = parsePortRange(ports)
-				if err != nil {
-					return err
-				}
-			}
-			cfg.Serve.PublicURL = public
-			cfg.Discord.WebhookURL = discord
-			if err := cfg.SaveAs(target); err != nil {
-				return err
-			}
-			if err := ensureIgnored(root, ".marshal/"); err != nil {
+			cfg, target, err := WriteConfig(root, InitOptions{
+				AppRoot:        appRoot,
+				Codeowners:     codeown,
+				PRD:            prd,
+				Spine:          spine,
+				Epics:          epics,
+				PublicURL:      public,
+				DiscordWebhook: discord,
+				Ports:          ports,
+				Refs:           specRefs,
+				Databases:      dbs,
+				Force:          force,
+			})
+			if err != nil {
 				return err
 			}
 			return emit(cmd.OutOrStdout(), map[string]any{"path": target, "references": len(cfg.References), "next": "edit the file, then `marshal setup --token <admin token>`"})
