@@ -67,13 +67,28 @@ version=$(printf '%s' "$rel" | sed -n 's/.*"tag_name"[ ]*:[ ]*"\([^"]*\)".*/\1/p
 asset="veans_${version}_${os}_${arch}.tar.gz"
 info "release ${version}"
 
+# GitHub returns PRETTY-PRINTED JSON, so an asset's "id" and "name" sit on
+# different lines. Splitting on '{' alone therefore leaves grep holding a line
+# that has the name and no id, and the sed below finds nothing — asset_id comes
+# back empty and every install dies with "has no asset named ...".
+#
+# Collapse the newlines, and the spaces around each colon, so that splitting on
+# '{' puts one asset object on one line with both fields on it. Handles compact
+# JSON too, which is what this originally assumed.
+json=$(printf '%s' "$rel" | tr -d '\r\n' | sed 's/"[[:space:]]*:[[:space:]]*/":/g')
+
+# asset_id_of NAME -> the numeric id of the release asset called NAME.
+asset_id_of() {
+  printf '%s' "$json" \
+    | tr '{' '\n' \
+    | grep -F "\"name\":\"$1\"" \
+    | sed -n 's/.*"id":\([0-9]*\).*/\1/p' \
+    | head -1
+}
+
 # Private-repo assets are not downloadable by browser_download_url; they must
 # be fetched by asset id with an octet-stream Accept header.
-asset_id=$(printf '%s' "$rel" \
-  | tr '{' '\n' \
-  | grep -F "\"name\": \"${asset}\"" \
-  | sed -n 's/.*"id"[ ]*:[ ]*\([0-9]*\).*/\1/p' \
-  | head -1)
+asset_id=$(asset_id_of "$asset")
 [ -n "$asset_id" ] || die "release ${version} has no asset named ${asset}"
 
 tmp=$(mktemp -d)
@@ -86,8 +101,7 @@ curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
   || die "download failed"
 
 # -------------------------------------------------------------- checksum
-sum_id=$(printf '%s' "$rel" | tr '{' '\n' | grep -F '"name": "checksums.txt"' \
-  | sed -n 's/.*"id"[ ]*:[ ]*\([0-9]*\).*/\1/p' | head -1)
+sum_id=$(asset_id_of checksums.txt)
 if [ -n "$sum_id" ]; then
   curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/octet-stream" \
        "${API}/releases/assets/${sum_id}" -o "${tmp}/checksums.txt" || true
