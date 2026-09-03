@@ -94,13 +94,17 @@ func (b *Board) TaskURL(taskID int64) string {
 
 // Snapshot is everything the checkers read at once.
 type Snapshot struct {
-	Tasks  []*client.Task
-	ByID   map[int64]*client.Task
-	Leases []*client.TaskPathLease
+	Tasks []*client.Task
+	// DoneTasks carries closed tasks for their parent links alone. The
+	// invariants checker needs them to tell a completed epic from a leaf
+	// that forgot its claim; nothing else should iterate them.
+	DoneTasks []*client.Task
+	ByID      map[int64]*client.Task
+	Leases    []*client.TaskPathLease
 }
 
 // Snapshot reads the project's open tasks with scope, buckets and relations,
-// plus every live lease.
+// plus the closed tasks' parent links and every live lease.
 func (b *Board) Snapshot(ctx context.Context) (*Snapshot, error) {
 	tasks, err := b.Client.ListProjectTasks(ctx, b.Cfg.ProjectID, &client.TaskListOptions{
 		Filter: "done = false",
@@ -109,11 +113,20 @@ func (b *Board) Snapshot(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Closed tasks, relations only: a container is any task something hangs
+	// under, open or done, so an epic whose children all shipped stays a
+	// container instead of being judged as a story with no claim.
+	doneTasks, err := b.Client.ListProjectTasks(ctx, b.Cfg.ProjectID, &client.TaskListOptions{
+		Filter: "done = true",
+	})
+	if err != nil {
+		return nil, err
+	}
 	leases, err := b.Client.ListProjectLeases(ctx, b.Cfg.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	s := &Snapshot{Tasks: tasks, ByID: map[int64]*client.Task{}, Leases: leases}
+	s := &Snapshot{Tasks: tasks, DoneTasks: doneTasks, ByID: map[int64]*client.Task{}, Leases: leases}
 	for _, t := range tasks {
 		s.ByID[t.ID] = t
 	}
@@ -133,6 +146,15 @@ func (s *Snapshot) InvariantTasks() ([]invariants.Task, []invariants.Lease) {
 		}
 		it.BlockedBy = relatedIDs(t, "blocked")
 		it.Follows = relatedIDs(t, "follows")
+		if parents := relatedIDs(t, "parenttask"); len(parents) > 0 {
+			it.ParentID = parents[0]
+		}
+		tasks = append(tasks, it)
+	}
+	// Closed tasks enter the checker carrying only Done and ParentID: build()
+	// keeps them out of the open set and uses them solely to mark containers.
+	for _, t := range s.DoneTasks {
+		it := invariants.Task{ID: t.ID, Identifier: t.Identifier, Title: t.Title, Done: true}
 		if parents := relatedIDs(t, "parenttask"); len(parents) > 0 {
 			it.ParentID = parents[0]
 		}
