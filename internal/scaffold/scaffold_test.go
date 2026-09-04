@@ -129,7 +129,9 @@ func TestExistingFilesAreSkippedUnlessForced(t *testing.T) {
 		t.Fatalf("first Write: %v", err)
 	}
 	mcp := filepath.Join(root, ".mcp.json")
-	if err := os.WriteFile(mcp, []byte(`{"mine":true}`), 0o644); err != nil {
+	// 0o600: gosec's G306 caps written files at that, and the mode is
+	// incidental here — the assertion is that Write skips an existing file.
+	if err := os.WriteFile(mcp, []byte(`{"mine":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
