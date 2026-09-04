@@ -1,0 +1,65 @@
+# Build, test and lint on every pull request.
+#
+# This repository had no CI at all, which is how a gosec finding in
+# internal/scaffold reached main and was then discovered by a CONSUMER: the
+# vendored copy in EPYCD/workman is linted there, so its veans-lint job failed
+# on a pull request that touched only deploy/. A finding should surface where
+# the code lives.
+#
+# The lint job deliberately mirrors workman's: golangci-lint v2.13.0 against
+# this repository's own .golangci.yml. If the two ever diverge, findings go
+# back to being discovered downstream, which is the failure this exists to end.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # -short on purpose: e2e/ needs a live Vikunja and its TestMain skips
+      # under -short. The full suite runs against a real instance, not here.
+      - run: go test -short ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          # Matches EPYCD/workman's pinned version, so the vendored copy and
+          # this one are judged by the same linter and the same config.
+          version: v2.13.0
