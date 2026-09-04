@@ -11,18 +11,21 @@ every `SessionStart` and `PreCompact`, so context never goes stale.
 
 ## Quick start
 
-Install `veans` and `marshal`. The repository is private, so the installers
-need a GitHub token with `Contents: read` — or an authenticated `gh`.
+Install `veans` and `marshal`. No token needed:
 
 ```sh
 # Linux and macOS (native builds for amd64 and arm64)
-GH_TOKEN=ghp_xxx sh -c "$(curl -fsSL https://raw.githubusercontent.com/EPYCD/veans/main/install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/EPYCD/veans/main/install.sh)"
 ```
 
 ```powershell
 # Windows (native; no WSL required)
-$env:GH_TOKEN = "ghp_xxx"; iwr -useb https://raw.githubusercontent.com/EPYCD/veans/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/EPYCD/veans/main/install.ps1 | iex
 ```
+
+Set `GH_TOKEN` (or be signed in to `gh`) if you are hitting GitHub's anonymous
+rate limit; the installers use it when it is there and do not need it when it
+is not.
 
 Then, from inside the repository you want coordinated:
 
