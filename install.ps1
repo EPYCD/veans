@@ -3,7 +3,7 @@
   Installs veans and marshal on Windows.
 
 .DESCRIPTION
-  The repository is private, so a token is required. Set GH_TOKEN or
+  A token is optional while the repository is public. Set GH_TOKEN or
   GITHUB_TOKEN, or be signed in to the gh CLI. A fine-grained token needs
   only "Contents: read" on this one repository.
 
@@ -46,13 +46,14 @@ $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:
 if (-not $token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
     try { $token = (gh auth token 2>$null).Trim() } catch { }
 }
-if (-not $token) { Die "no GitHub token. $Repo is private - set `$env:GH_TOKEN, or run 'gh auth login'" }
-
+# No token is not an error: the repository is public, so releases and their
+# assets are readable anonymously - just rate-limited by IP. Only send
+# Authorization when there is something to send; an empty Bearer is rejected.
 $headers = @{
-    Authorization          = "Bearer $token"
     'X-GitHub-Api-Version' = '2022-11-28'
     Accept                 = 'application/vnd.github+json'
 }
+if ($token) { $headers.Authorization = "Bearer $token" }
 
 # -------------------------------------------------------------- resolve
 try {
@@ -77,10 +78,11 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
     $zip = Join-Path $tmp $assetName
 
-    # Private-repo assets download by asset id with an octet-stream Accept
-    # header; browser_download_url returns HTML for a private repository.
+    # Assets download by id with an octet-stream Accept header. That path
+    # works for public and private repositories alike.
     Info "downloading $assetName"
-    $dl = @{ Authorization = "Bearer $token"; Accept = 'application/octet-stream' }
+    $dl = @{ Accept = 'application/octet-stream' }
+    if ($token) { $dl.Authorization = "Bearer $token" }
     Invoke-WebRequest -Headers $dl -Uri "$api/releases/assets/$($asset.id)" -OutFile $zip
 
     # ----------------------------------------------------------- checksum
