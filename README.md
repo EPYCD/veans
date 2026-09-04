@@ -160,6 +160,32 @@ bot:
   user_id: 99
 ```
 
+### Per-person bots: `.veans.local.yml`
+
+`.veans.yml` is committed, so everyone in a repo shares the bot it names —
+every claim and assignee reads `bot-<repo>`, and the board cannot tell who
+did what. To give each person their own identity, drop a `.veans.local.yml`
+beside it and **add it to `.gitignore`**:
+
+```yaml
+bot:
+  username: bot-alice
+  user_id: 42
+```
+
+Only the `bot` block is overridable. Project, view and bucket IDs stay
+authoritative in the committed file, so everyone still reads the same board;
+a stray local file cannot quietly point someone at another project. Both
+fields are required — the token is looked up by username and "is this task
+mine?" is answered by user_id, so half an override would authenticate as one
+bot and filter for another, which surfaces as an empty ready queue rather
+than an error.
+
+Setup per person: an admin creates the bot user and shares the project with
+it at read+write, then that person writes the file above and runs `veans
+login`, which mints a token for whichever bot the config now resolves to.
+`veans agents` then renders `bot-alice · for Alice`.
+
 ## Credentials
 
 Resolved in order on every command:

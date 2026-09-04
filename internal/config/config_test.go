@@ -91,3 +91,79 @@ func TestFindMissing(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+// writeConfigPair writes a .veans.yml, plus a .veans.local.yml when local is
+// non-empty, and returns the path to the committed one.
+func writeConfigPair(t *testing.T, local string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, Filename)
+	committed := "" +
+		"server: https://board.example.com\n" +
+		"project_id: 3\n" +
+		"view_id: 12\n" +
+		"buckets:\n  todo: 7\n  in_progress: 8\n  in_review: 10\n  done: 9\n  scrapped: 11\n" +
+		"bot:\n  username: bot-capyard\n  user_id: 3\n"
+	if err := os.WriteFile(path, []byte(committed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if local != "" {
+		if err := os.WriteFile(filepath.Join(dir, LocalFilename), []byte(local), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+// Each person acts as their own bot, so claims and assignees name them,
+// while the board coordinates stay shared.
+func TestLoadLocalOverridesBotOnly(t *testing.T) {
+	path := writeConfigPair(t, "bot:\n  username: bot-alice\n  user_id: 42\n")
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Bot.Username != "bot-alice" || c.Bot.UserID != 42 {
+		t.Errorf("bot = %+v, want bot-alice/42", c.Bot)
+	}
+	if c.ProjectID != 3 || c.ViewID != 12 || c.Buckets.Todo != 7 {
+		t.Errorf("local override leaked past bot: project=%d view=%d todo=%d",
+			c.ProjectID, c.ViewID, c.Buckets.Todo)
+	}
+	if c.LocalPath() == "" {
+		t.Error("LocalPath is empty after an override was applied")
+	}
+}
+
+func TestLoadWithoutLocalKeepsCommittedBot(t *testing.T) {
+	c, err := Load(writeConfigPair(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Bot.Username != "bot-capyard" || c.Bot.UserID != 3 {
+		t.Errorf("bot = %+v, want the committed bot-capyard/3", c.Bot)
+	}
+	if c.LocalPath() != "" {
+		t.Errorf("LocalPath = %q, want empty", c.LocalPath())
+	}
+}
+
+// Half an override would authenticate as one bot and filter tasks for
+// another, which fails as a silent empty ready queue rather than an error.
+func TestLoadLocalRejectsPartialBot(t *testing.T) {
+	for name, local := range map[string]string{
+		"username only": "bot:\n  username: bot-alice\n",
+		"user_id only":  "bot:\n  user_id: 42\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfigPair(t, local))
+			if err == nil {
+				t.Fatal("expected an error, got none")
+			}
+			if !strings.Contains(err.Error(), "both username and user_id") {
+				t.Errorf("error does not explain what is missing: %v", err)
+			}
+		})
+	}
+}

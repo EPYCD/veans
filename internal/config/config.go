@@ -37,6 +37,10 @@ import (
 // Filename is the canonical config name. Walked upward from cwd by Find.
 const Filename = ".veans.yml"
 
+// LocalFilename is the per-developer override read from beside Filename.
+// It is never committed: add it to .gitignore.
+const LocalFilename = ".veans.local.yml"
+
 // Config is the on-disk shape of .veans.yml.
 type Config struct {
 	Server            string  `yaml:"server"`
@@ -57,7 +61,16 @@ type Config struct {
 	// don't surface this knob unless the operator opts in.
 	HTTPTimeout time.Duration `yaml:"http_timeout,omitempty"`
 
-	path string `yaml:"-"`
+	path      string `yaml:"-"`
+	localPath string `yaml:"-"`
+}
+
+// Local is the shape of .veans.local.yml. Only the bot identity is
+// overridable: project, view and bucket IDs stay authoritative in the
+// committed .veans.yml so everyone on a repo reads the same board, while
+// each person can act as their own bot and get their own attribution.
+type Local struct {
+	Bot *Bot `yaml:"bot,omitempty"`
 }
 
 // Buckets maps the five canonical statuses to bucket IDs.
@@ -77,6 +90,9 @@ type Bot struct {
 
 // Path returns the absolute path the config was loaded from (or written to).
 func (c *Config) Path() string { return c.path }
+
+// LocalPath returns the .veans.local.yml that overrode this config, or "".
+func (c *Config) LocalPath() string { return c.localPath }
 
 // FormatTaskID renders a numeric task index in the project's preferred form:
 // PROJ-NN if the project has an identifier, #NN otherwise.
@@ -128,7 +144,38 @@ func Load(path string) (*Config, error) {
 		return nil, output.Wrap(output.CodeValidation, err, "parse %s: %v", path, err)
 	}
 	c.path = path
+	if err := c.applyLocal(filepath.Join(filepath.Dir(path), LocalFilename)); err != nil {
+		return nil, err
+	}
 	return &c, nil
+}
+
+// applyLocal overlays .veans.local.yml when it exists beside the config. A
+// missing file is the normal case and not an error.
+func (c *Config) applyLocal(path string) error {
+	buf, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var l Local
+	if err := yaml.Unmarshal(buf, &l); err != nil {
+		return output.Wrap(output.CodeValidation, err, "parse %s: %v", path, err)
+	}
+	if l.Bot != nil {
+		// Both halves are load-bearing: the token is looked up by username,
+		// and "is this task mine?" is answered by user_id. Half an override
+		// would authenticate as one bot and filter for another.
+		if l.Bot.Username == "" || l.Bot.UserID == 0 {
+			return output.New(output.CodeValidation,
+				"%s: bot needs both username and user_id", path)
+		}
+		c.Bot = *l.Bot
+	}
+	c.localPath = path
+	return nil
 }
 
 // SaveAs writes the config to `path` and remembers it as c.path.
