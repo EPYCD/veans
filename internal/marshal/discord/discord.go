@@ -29,6 +29,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -83,23 +85,67 @@ type Message struct {
 // Notifier posts to one channel webhook.
 type Notifier struct {
 	URL        string
-	Username   string
-	AvatarURL  string
 	HTTPClient *http.Client
 	// Now is overridable for tests.
 	Now func() time.Time
+
+	// Presentation comes from the board and can change between polls, while
+	// Send runs from both the watch loop and the webhook receiver — hence the
+	// mutex rather than plain fields.
+	mu        sync.RWMutex
+	username  string
+	avatarURL string
+	events    map[string]bool
 }
 
 // New returns a notifier; an empty url makes Send a no-op so callers need
 // not branch on whether Discord is configured.
 func New(url, username, avatar string) *Notifier {
-	return &Notifier{
+	n := &Notifier{
 		URL:        url,
-		Username:   username,
-		AvatarURL:  avatar,
 		HTTPClient: &http.Client{Timeout: 15 * time.Second},
 		Now:        time.Now,
 	}
+	n.SetPresentation(username, avatar, "")
+	return n
+}
+
+// SetPresentation replaces the name, avatar and event filter the notifier
+// posts with. Empty values mean "unset": no name override, no avatar, and no
+// filter, which posts everything. events is the board's comma-separated form.
+func (n *Notifier) SetPresentation(username, avatar, events string) {
+	if n == nil {
+		return
+	}
+	set := map[string]bool{}
+	for _, e := range strings.Split(events, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			set[e] = true
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.username, n.avatarURL = username, avatar
+	if len(set) == 0 {
+		n.events = nil
+		return
+	}
+	n.events = set
+}
+
+// Allows reports whether an event of this kind should be posted. An empty
+// filter allows everything, and an empty kind is always allowed so a caller
+// that has no name for its card is never silently dropped.
+func (n *Notifier) Allows(kind string) bool {
+	if n == nil {
+		return false
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	if len(n.events) == 0 || kind == "" {
+		return true
+	}
+	return n.events[kind]
 }
 
 // Enabled reports whether a webhook is configured.
@@ -111,11 +157,14 @@ func (n *Notifier) Send(ctx context.Context, m Message) error {
 	if !n.Enabled() {
 		return nil
 	}
+	n.mu.RLock()
+	username, avatar := n.username, n.avatarURL
+	n.mu.RUnlock()
 	if m.Username == "" {
-		m.Username = n.Username
+		m.Username = username
 	}
 	if m.AvatarURL == "" {
-		m.AvatarURL = n.AvatarURL
+		m.AvatarURL = avatar
 	}
 	for i := range m.Embeds {
 		if m.Embeds[i].Timestamp == "" {

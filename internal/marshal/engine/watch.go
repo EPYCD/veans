@@ -63,6 +63,16 @@ func (e *Engine) Tick(ctx context.Context, base string) *TickResult {
 		}
 	}
 
+	// Take the relay's presentation from the board before anything can post,
+	// so a change made in project settings applies on this pass. A failure is
+	// tolerated deliberately: the relay keeps whatever it had rather than
+	// falling silent or reverting to the file mid-run.
+	if rs, err := e.Board.RelaySettings(ctx); err != nil {
+		res.Errors = append(res.Errors, "relay settings: "+err.Error())
+	} else {
+		e.ApplyRelaySettings(rs)
+	}
+
 	e.mu.Lock()
 	prev := e.index
 	e.mu.Unlock()
@@ -150,7 +160,9 @@ func (e *Engine) announceDrift(ctx context.Context, snap *board.Snapshot, ix *re
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelDrift, "f59e0b")
 			}
 			e.log(ledger.Entry{Action: "drift", TaskID: t.ID, Subject: r.ID, Outcome: kind, Metadata: map[string]any{"rev": ix.Rev}})
-			e.Notify(ctx, e.Format.FromFinding(notify.Finding{
+			// The literal, not the local `kind`: that one is the drift's own
+			// classification, not the event name the filter matches on.
+			e.Notify(ctx, "drift", e.Format.FromFinding(notify.Finding{
 				Kind: "drift", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title,
 				Summary: msg,
 				Details: []discord.Field{{Name: "Assignee", Value: assigneeNames(t), Inline: true}, {Name: "Reference", Value: r.ID, Inline: true}},
@@ -218,7 +230,7 @@ func (e *Engine) announceReferences(ctx context.Context, snap *board.Snapshot, r
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelBroken, "ef4444")
 				e.log(ledger.Entry{Action: "broken_ref", TaskID: t.ID, Subject: strings.Join(ids, ","), Outcome: "flagged"})
-				e.Notify(ctx, e.Format.FromFinding(notify.Finding{Kind: "broken_ref", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg}))
+				e.Notify(ctx, "broken_ref", e.Format.FromFinding(notify.Finding{Kind: "broken_ref", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg}))
 			}
 		} else {
 			e.flags.Clear(fmt.Sprintf("broken:%d", t.ID))
@@ -233,7 +245,7 @@ func (e *Engine) announceReferences(ctx context.Context, snap *board.Snapshot, r
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelPaste, "f59e0b")
 				e.log(ledger.Entry{Action: "paste", TaskID: t.ID, Subject: m.File, Outcome: "flagged", Metadata: map[string]any{"words": m.Words, "line": m.Line}})
-				e.Notify(ctx, e.Format.FromFinding(notify.Finding{Kind: "paste", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Excerpt", Value: m.Excerpt}}}))
+				e.Notify(ctx, "paste", e.Format.FromFinding(notify.Finding{Kind: "paste", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Excerpt", Value: m.Excerpt}}}))
 			}
 		} else {
 			e.flags.Clear(fmt.Sprintf("paste:%d", t.ID))
@@ -265,7 +277,7 @@ func (e *Engine) announceBranches(ctx context.Context, snap *board.Snapshot, bas
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelStale, "64748b")
 				e.log(ledger.Entry{Action: "stale", TaskID: t.ID, Subject: c.Branch, Outcome: "flagged", Metadata: map[string]any{"last_activity": c.LastActivity}})
-				e.Notify(ctx, e.Format.FromFinding(notify.Finding{Kind: "stale", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Assignee", Value: assigneeNames(t), Inline: true}, {Name: "Branch", Value: c.Branch, Inline: true}}}))
+				e.Notify(ctx, "stale", e.Format.FromFinding(notify.Finding{Kind: "stale", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Assignee", Value: assigneeNames(t), Inline: true}, {Name: "Branch", Value: c.Branch, Inline: true}}}))
 			}
 		} else {
 			e.flags.Clear(fmt.Sprintf("stale:%d", c.TaskID))
@@ -290,7 +302,7 @@ func (e *Engine) announceBranches(ctx context.Context, snap *board.Snapshot, bas
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p><ul><li>"+html.EscapeString(strings.Join(files, "</li><li>"))+"</li></ul>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelStray, "ef4444")
 				e.log(ledger.Entry{Action: "stray", TaskID: t.ID, Subject: c.Branch, Outcome: "flagged", Metadata: map[string]any{"strays": c.Result.Strays, "collisions": c.Result.Collisions}})
-				e.Notify(ctx, e.Format.FromFinding(notify.Finding{Kind: "stray", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Files", Value: strings.Join(files, "\n")}}}))
+				e.Notify(ctx, "stray", e.Format.FromFinding(notify.Finding{Kind: "stray", TaskID: t.ID, Identifier: t.Identifier, Title: t.Title, Summary: msg, Details: []discord.Field{{Name: "Files", Value: strings.Join(files, "\n")}}}))
 			}
 		} else if c.Result != nil {
 			e.flags.Clear(fmt.Sprintf("stray:%d", c.TaskID))
@@ -318,7 +330,7 @@ func (e *Engine) announceHealth(ctx context.Context, snap *board.Snapshot, res *
 		}
 		fields = append(fields, discord.Field{Name: f.Code, Value: f.Message})
 	}
-	e.Notify(ctx, e.Format.FromFinding(notify.Finding{Kind: "health", Summary: summary, Details: fields}))
+	e.Notify(ctx, "health", e.Format.FromFinding(notify.Finding{Kind: "health", Summary: summary, Details: fields}))
 	return 1
 }
 
@@ -334,7 +346,7 @@ func (e *Engine) HandleDelivery(ctx context.Context, d notify.Delivery) {
 		entry.Actor = ev.Doer.Username
 	}
 	e.log(entry)
-	e.Notify(ctx, e.Format.FromDelivery(d))
+	e.Notify(ctx, d.EventName, e.Format.FromDelivery(d))
 }
 
 func plural(n int, many, one string) string {

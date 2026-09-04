@@ -106,6 +106,25 @@ func Load(dir string) (*Engine, error) {
 	return e, nil
 }
 
+// ApplyRelaySettings takes the board's presentation for the relay. Called on
+// each poll, so a change in the project's settings applies without a restart.
+// The file's values remain the fallback: an empty field on the board means
+// "not set here", not "clear what the operator configured".
+func (e *Engine) ApplyRelaySettings(s board.RelaySettings) {
+	username, avatar := s.Username, s.AvatarURL
+	if username == "" {
+		username = e.Cfg.Discord.Username
+	}
+	if avatar == "" {
+		avatar = e.Cfg.Discord.AvatarURL
+	}
+	events := s.Events
+	if events == "" {
+		events = strings.Join(e.Cfg.Discord.Events, ",")
+	}
+	e.Discord.SetPresentation(username, avatar, events)
+}
+
 // Prefixes lists the configured reference prefixes.
 func (e *Engine) Prefixes() []string {
 	out := make([]string, 0, len(e.Cfg.References))
@@ -561,9 +580,11 @@ func (e *Engine) log(entry ledger.Entry) {
 // Log is the exported form for callers outside the package.
 func (e *Engine) Log(entry ledger.Entry) { e.log(entry) }
 
-// Notify posts a Discord message when configured, logging failures.
-func (e *Engine) Notify(ctx context.Context, m *discord.Message) {
-	if m == nil || !e.Discord.Enabled() {
+// Notify posts a Discord message when configured, logging failures. kind is
+// the event's name, matched against the board's event filter; pass "" for a
+// card that has no name, which is always posted rather than silently dropped.
+func (e *Engine) Notify(ctx context.Context, kind string, m *discord.Message) {
+	if m == nil || !e.Discord.Enabled() || !e.Discord.Allows(kind) {
 		return
 	}
 	if err := e.Discord.Send(ctx, *m); err != nil {

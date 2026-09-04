@@ -58,6 +58,14 @@ type Project struct {
 	// ReceiptBotID is the CI identity; while set, done needs a merged,
 	// passing receipt from it.
 	ReceiptBotID int64 `json:"receipt_bot_id,omitempty"`
+
+	// How the relay presents this project. Set from the board's project
+	// settings; the webhook URL is deliberately not here, it stays a
+	// credential in the relay's own environment.
+	DiscordUsername  string `json:"discord_username,omitempty"`
+	DiscordAvatarURL string `json:"discord_avatar_url,omitempty"`
+	// DiscordEvents is comma separated; empty posts everything.
+	DiscordEvents string `json:"discord_events,omitempty"`
 }
 
 // ProjectView is a saved view (Kanban/List/Gantt/Table) on a project.

@@ -92,3 +92,44 @@ func TestSend_ErrorNamesStatus(t *testing.T) {
 		t.Fatalf("expected a 400 error, got %v", err)
 	}
 }
+
+// The board can change how the relay presents itself between polls, so the
+// filter and identity have to be replaceable on a live notifier.
+func TestSetPresentation(t *testing.T) {
+	n := New("https://discord.example/webhook", "Marshal", "https://avatar")
+
+	t.Run("no filter posts everything", func(t *testing.T) {
+		if !n.Allows("drift") || !n.Allows("health") {
+			t.Fatal("an unset filter must allow every event")
+		}
+	})
+
+	t.Run("a filter admits only what it names", func(t *testing.T) {
+		n.SetPresentation("CapYard", "", "drift, stale ,,")
+		if !n.Allows("drift") || !n.Allows("stale") {
+			t.Error("named events must be allowed, and whitespace and empties ignored")
+		}
+		if n.Allows("health") {
+			t.Error("an event the filter does not name must be dropped")
+		}
+		// A card with no name is never silently dropped.
+		if !n.Allows("") {
+			t.Error("an unnamed card must still post")
+		}
+	})
+
+	t.Run("clearing the filter restores everything", func(t *testing.T) {
+		n.SetPresentation("CapYard", "", "")
+		if !n.Allows("health") {
+			t.Fatal("an emptied filter must go back to allowing every event")
+		}
+	})
+
+	t.Run("a nil notifier allows nothing and does not panic", func(t *testing.T) {
+		var none *Notifier
+		none.SetPresentation("x", "y", "z")
+		if none.Allows("drift") {
+			t.Fatal("a nil notifier must not claim to allow an event")
+		}
+	})
+}

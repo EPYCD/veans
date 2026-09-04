@@ -103,6 +103,31 @@ type Snapshot struct {
 	Leases    []*client.TaskPathLease
 }
 
+// RelaySettings is how the board says this project should appear in Discord.
+// The webhook URL is not among them: it is a credential and stays in the
+// relay's environment, so this only carries presentation.
+type RelaySettings struct {
+	Username  string
+	AvatarURL string
+	// Events is comma separated, empty meaning every event.
+	Events string
+}
+
+// RelaySettings fetches the project so a change made in the board's settings
+// takes effect on the next poll, with nothing to restart. A failure is the
+// caller's to tolerate: the relay should keep posting with whatever it had.
+func (b *Board) RelaySettings(ctx context.Context) (RelaySettings, error) {
+	p, err := b.Client.GetProject(ctx, b.Cfg.ProjectID)
+	if err != nil {
+		return RelaySettings{}, err
+	}
+	return RelaySettings{
+		Username:  p.DiscordUsername,
+		AvatarURL: p.DiscordAvatarURL,
+		Events:    p.DiscordEvents,
+	}, nil
+}
+
 // Snapshot reads the project's open tasks with scope, buckets and relations,
 // plus the closed tasks' parent links and every live lease.
 func (b *Board) Snapshot(ctx context.Context) (*Snapshot, error) {
