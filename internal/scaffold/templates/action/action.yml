@@ -132,11 +132,17 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         # pull_request events carry the PR directly; workflow_run events carry
         # it under workflow_run.pull_requests (empty for forks).
-        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.workflow_run.pull_requests[0].base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
-        MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        # A push carries neither: `before` is the previous tip of the branch
+        # and `sha` the merge commit, which is the range the merge brought in.
+        # Without these, close mode dies in require_commits and, being
+        # non-blocking, does so invisibly — a green run that never closed.
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.workflow_run.pull_requests[0].base.sha || github.event.before }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.sha }}
+        MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.event.head_commit.id }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
-        PR_URL: ${{ github.event.pull_request.html_url || format('{0}/{1}/pull/{2}', github.server_url, github.repository, github.event.workflow_run.pull_requests[0].number) }}
+        # Only build the URL when there is a number to build it from: on a
+        # push the format() would yield a link ending in /pull/ and nothing else.
+        PR_URL: ${{ github.event.pull_request.html_url || (github.event.workflow_run.pull_requests[0].number && format('{0}/{1}/pull/{2}', github.server_url, github.repository, github.event.workflow_run.pull_requests[0].number)) || '' }}
         PR_TITLE: ${{ github.event.pull_request.title || github.event.workflow_run.display_title }}
         PR_AUTHOR: ${{ github.event.pull_request.user.login || github.event.workflow_run.actor.login }}
         RUN_URL: ${{ inputs.run-url || github.event.workflow_run.html_url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
