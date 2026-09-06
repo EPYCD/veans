@@ -32,7 +32,10 @@ func TestScopeFlags_ApplyKeepsUnsetFields(t *testing.T) {
 	}
 
 	f := &scopeFlags{owned: []string{"pkg/routes/**"}, ownedSet: true, notes: "", notesSet: true}
-	got := f.apply(stored)
+	got, err := f.apply(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	want := &client.TaskScope{
 		PathsOwned:    []string{"pkg/routes/**"},
@@ -47,7 +50,10 @@ func TestScopeFlags_ApplyKeepsUnsetFields(t *testing.T) {
 
 func TestScopeFlags_ApplyFromNothingSendsEmptyLists(t *testing.T) {
 	f := &scopeFlags{endpoints: []string{"POST /y"}, endpSet: true}
-	got := f.apply(nil)
+	got, err := f.apply(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Empty slices, not nil: the PUT body must carry `[]` so the server
 	// validator sees lists, and a later read compares equal.
 	if got.PathsOwned == nil || got.PathsAffected == nil {
@@ -58,13 +64,39 @@ func TestScopeFlags_ApplyFromNothingSendsEmptyLists(t *testing.T) {
 	}
 }
 
-func TestWithRepoPrefix(t *testing.T) {
-	got := withRepoPrefix("api", []string{"pkg/models/**", "web:src/App.vue", " docs/x.md ", ""})
-	want := []string{"api:pkg/models/**", "web:src/App.vue", "api:docs/x.md", ""}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("withRepoPrefix = %v, want %v", got, want)
+// TestScopeFlags_ApplyCanonicalises pins what `veans scope` stores: the
+// repository namespace applied to bare paths, the spelling canonicalised,
+// blanks dropped. A path the caller wrote by hand is the first place a second
+// identity for one file can be minted, so it is the first place the one
+// normalisation runs.
+func TestScopeFlags_ApplyCanonicalises(t *testing.T) {
+	f := &scopeFlags{
+		repo:     "api",
+		owned:    []string{"./pkg/models//**", "web:src/App.vue", " docs/x.md ", "", "pkg/models/**"},
+		ownedSet: true,
 	}
-	if got := withRepoPrefix("", []string{"pkg/x"}); !reflect.DeepEqual(got, []string{"pkg/x"}) {
-		t.Fatalf("no repository configured must leave paths alone: %v", got)
+	got, err := f.apply(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "./pkg/models//**" and "pkg/models/**" are one path, stored once.
+	want := []string{"api:pkg/models/**", "web:src/App.vue", "api:docs/x.md"}
+	if !reflect.DeepEqual(got.PathsOwned, want) {
+		t.Fatalf("PathsOwned = %v, want %v", got.PathsOwned, want)
+	}
+
+	f = &scopeFlags{owned: []string{"pkg/x"}, ownedSet: true}
+	got, err = f.apply(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.PathsOwned, []string{"pkg/x"}) {
+		t.Fatalf("no repository configured must leave paths alone: %v", got.PathsOwned)
+	}
+
+	// A path that cannot be canonicalised is refused, never guessed at.
+	f = &scopeFlags{owned: []string{"../outside"}, ownedSet: true}
+	if _, err := f.apply(nil); err == nil {
+		t.Fatal("a path escaping the repository must be an error")
 	}
 }

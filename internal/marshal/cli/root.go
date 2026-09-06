@@ -57,6 +57,7 @@ CLI, and as an MCP server for agents (marshal mcp).`,
 	root.AddCommand(newChokepointsCmd())
 	root.AddCommand(newOpenCmd())
 	root.AddCommand(newReconcileCmd())
+	root.AddCommand(newLagCmd())
 	root.AddCommand(newWorktreeCmd())
 	root.AddCommand(newPoolCmd())
 	root.AddCommand(newClaimsCmd())

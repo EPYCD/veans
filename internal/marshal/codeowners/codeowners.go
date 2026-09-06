@@ -120,15 +120,27 @@ func (f *File) Matches(path string) []Rule {
 	return out
 }
 
-// Chokepoints returns the distinct patterns, in file order, normalised to
-// the form the board uses for paths_owned: leading "/" stripped, trailing "/"
-// replaced by "/**", e.g. "/captain-yard-web/src/lib/contract/" ->
-// "captain-yard-web/src/lib/contract/**". When the board's paths are relative
-// to a sub-directory, root ("captain-yard-web") strips that prefix too;
-// rules that do not fall under it come back in outside. Unanchored patterns
-// ("*.md", "apps/") apply everywhere, so they are always inside.
-func (f *File) Chokepoints(root string) (inside, outside []string) {
-	root = strings.Trim(root, "/")
+// Chokepoints returns the distinct patterns, in file order, in the canonical
+// form the board holds claims in: repository-root-relative, the anchoring "/"
+// stripped, a directory's trailing "/" replaced by "/**".
+//
+//	/captain-yard-web/src/server/db/repo.ts  ->  captain-yard-web/src/server/db/repo.ts
+//	/captain-yard-web/src/server/auth/       ->  captain-yard-web/src/server/auth/**
+//	/.github/                                ->  .github/**
+//
+// The leading "/" in CODEOWNERS means "anchored at the repository root", which
+// is exactly the canonical form's base, so the translation is a strip of one
+// character and a directory-to-glob rule and nothing more.
+//
+// It is deliberately NOT rebased onto app_root. app_root records where the
+// application lives so docs:api globs and the like resolve; it is not a base
+// for a claim, and using it as one is what made every queue on a project that
+// sets one permanently empty. The chokepoint read "src/server/db/repo.ts"
+// while every claim on that file — the pre-commit hook accepts nothing else —
+// read "captain-yard-web/src/server/db/repo.ts", so the two never met and an
+// always-empty queue was indistinguishable from a quiet one.
+func (f *File) Chokepoints() []string {
+	out := []string{}
 	seen := map[string]bool{}
 	for _, r := range f.Rules {
 		p := boardPattern(r.Pattern)
@@ -136,22 +148,9 @@ func (f *File) Chokepoints(root string) (inside, outside []string) {
 			continue
 		}
 		seen[p] = true
-		if root == "" {
-			inside = append(inside, p)
-			continue
-		}
-		switch {
-		case p == root:
-			inside = append(inside, "**")
-		case strings.HasPrefix(p, root+"/"):
-			inside = append(inside, strings.TrimPrefix(p, root+"/"))
-		case strings.HasPrefix(p, "**/") || p == "**":
-			inside = append(inside, p)
-		default:
-			outside = append(outside, p)
-		}
+		out = append(out, p)
 	}
-	return inside, outside
+	return out
 }
 
 // boardPattern rewrites a CODEOWNERS pattern into the board's dialect: the

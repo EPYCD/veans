@@ -173,6 +173,7 @@ type TaskReadiness struct {
 	Reasons        []string        `json:"reasons"`
 	BlockedBy      []*Task         `json:"blocked_by"`
 	LeaseConflicts []LeaseConflict `json:"lease_conflicts"`
+	Lag            *TaskLag        `json:"lag,omitempty"`
 }
 
 // GetTaskScope reads a task's scope. A task without one yields empty lists,
@@ -199,6 +200,32 @@ func (c *Client) PutTaskScope(ctx context.Context, taskID int64, scope *TaskScop
 // DeleteTaskScope removes the scope and any leases derived from it.
 func (c *Client) DeleteTaskScope(ctx context.Context, taskID int64) error {
 	return c.Do(ctx, "DELETE", fmt.Sprintf("/tasks/%d/scope", taskID), nil, nil, nil)
+}
+
+// PutTaskLag records how far a task's branch is behind the integration
+// branch. Marshal is the only caller.
+func (c *Client) PutTaskLag(ctx context.Context, taskID int64, lag *TaskLag) (*TaskLag, error) {
+	var out TaskLag
+	if err := c.Do(ctx, "PUT", fmt.Sprintf("/tasks/%d/lag", taskID), nil, lag, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteTaskLag clears the record, which is how a branch that has caught up
+// stops being reported as behind. An absent record means current; a stale one
+// would mean worse than nothing.
+func (c *Client) DeleteTaskLag(ctx context.Context, taskID int64) error {
+	return c.Do(ctx, "DELETE", fmt.Sprintf("/tasks/%d/lag", taskID), nil, nil, nil)
+}
+
+// GetTaskLag reads a task's lag record.
+func (c *Client) GetTaskLag(ctx context.Context, taskID int64) (*TaskLag, error) {
+	var out TaskLag
+	if err := c.Do(ctx, "GET", fmt.Sprintf("/tasks/%d/lag", taskID), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ListProjectLeases returns every active lease in the project, oldest first,

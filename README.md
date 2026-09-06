@@ -11,21 +11,18 @@ every `SessionStart` and `PreCompact`, so context never goes stale.
 
 ## Quick start
 
-Install `veans` and `marshal`. No token needed:
+Install `veans` and `marshal`. The repository is private, so the installers
+need a GitHub token with `Contents: read` — or an authenticated `gh`.
 
 ```sh
 # Linux and macOS (native builds for amd64 and arm64)
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/EPYCD/veans/main/install.sh)"
+GH_TOKEN=ghp_xxx sh -c "$(curl -fsSL https://raw.githubusercontent.com/EPYCD/veans/main/install.sh)"
 ```
 
 ```powershell
 # Windows (native; no WSL required)
-iwr -useb https://raw.githubusercontent.com/EPYCD/veans/main/install.ps1 | iex
+$env:GH_TOKEN = "ghp_xxx"; iwr -useb https://raw.githubusercontent.com/EPYCD/veans/main/install.ps1 | iex
 ```
-
-Set `GH_TOKEN` (or be signed in to `gh`) if you are hitting GitHub's anonymous
-rate limit; the installers use it when it is there and do not need it when it
-is not.
 
 Then, from inside the repository you want coordinated:
 
@@ -123,9 +120,13 @@ veans update <id>              --status, --title, --priority, --label-add/remove
                                --description, --description-replace-old/new, --description-append,
                                --comment, --reason, --if-unchanged-since
 veans claim <id>               assign the bot, move to In Progress, tag with current branch label, lease paths_owned
+                               (no label when on the default branch; --branch names one explicitly)
 veans ready                    ready queue with reasons (assigned / blocked / lease_conflict)
 veans scope <id> [flags]       show or set the task's scope (paths owned/affected, endpoints, notes)
 veans leases                   list the paths in-progress tasks are editing right now
+veans unclaim <id>             hand a task back: drop the assignee, return to Todo, release leases, remove the branch label
+veans sync <id>                what your branch is behind on, by severity, and the commands to catch up (changes nothing)
+                               `update -s in-review` refuses while behind in a file you own; --force overrides and says so on the task
 veans release <id>             drop a task's leases without changing its status
 veans heartbeat <id>           mark a task's leases active (long silent work)
 veans check [--staged]         changed files vs the referenced tasks' scopes and others' leases

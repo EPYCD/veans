@@ -34,10 +34,10 @@ const (
 
 // PasteMatch is a verbatim run shared between task text and a spec file.
 type PasteMatch struct {
-	File    string
-	Line    int    // 1-based line in the spec file where the run starts
-	Words   int    // length of the run in words
-	Excerpt string // first 120 chars of the run
+	File    string `json:"file"`
+	Line    int    `json:"line"`    // 1-based line in the spec file where the run starts
+	Words   int    `json:"words"`   // length of the run in words
+	Excerpt string `json:"excerpt"` // first 120 chars of the run
 }
 
 // SpecCorpus indexes the text of configured spec files for paste detection.

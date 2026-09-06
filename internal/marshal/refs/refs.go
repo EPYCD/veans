@@ -50,12 +50,12 @@ type Source struct {
 
 // Anchor is one resolvable location in a spec file.
 type Anchor struct {
-	ID    string // "FR-161a"
-	File  string // repo-relative
-	Line  int    // 1-based line of the anchor
-	Title string // rest of the anchor line after the id, without emphasis/heading marks and leading separators
-	Text  string // anchor line plus following lines up to the next anchor, heading, or two blank lines; capped at 40 lines
-	Hash  string // sha256 hex of Text with all whitespace collapsed
+	ID    string `json:"id"`    // "FR-161a"
+	File  string `json:"file"`  // repo-relative
+	Line  int    `json:"line"`  // 1-based line of the anchor
+	Title string `json:"title"` // rest of the anchor line after the id, without emphasis/heading marks and leading separators
+	Text  string `json:"text"`  // anchor line plus following lines up to the next anchor, heading, or two blank lines; capped at 40 lines
+	Hash  string `json:"hash"`  // sha256 hex of Text with all whitespace collapsed
 }
 
 // Index is every anchor of every source at one revision of the repository.
@@ -70,26 +70,32 @@ type Reader interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 }
 
+// The json tags on the types below are load-bearing. They cross the wire to
+// the board's panels, which read snake_case; without them Go emits its own
+// field names and the panel reads undefined off every object. That is not a
+// cosmetic mismatch — "undefined is not an object (evaluating 'e.ref.prefix')"
+// is what a reader gets when they open a ticket.
+
 // Ref is a reference found in free text.
 type Ref struct {
-	ID     string // "FR-161"
-	Prefix string
-	Offset int // byte offset into the text passed to Extract, before HTML stripping
+	ID     string `json:"id"` // "FR-161"
+	Prefix string `json:"prefix"`
+	Offset int    `json:"offset"` // byte offset into the text passed to Extract, before HTML stripping
 }
 
 // Resolution is what a task's reference renders as.
 type Resolution struct {
-	Ref        Ref
-	Found      bool
-	Anchor     Anchor // zero when !Found
-	Provenance string // "prd.md@<12-char sha>" from Index.Rev, else Index.Files[file]; "" when neither is known
+	Ref        Ref    `json:"ref"`
+	Found      bool   `json:"found"`
+	Anchor     Anchor `json:"anchor"`     // zero when !Found
+	Provenance string `json:"provenance"` // "prd.md@<12-char sha>" from Index.Rev, else Index.Files[file]; "" when neither is known
 }
 
 // Drift lists how anchors moved between two indexes.
 type Drift struct {
-	Changed  []string // ids present in both with different Hash
-	Vanished []string // ids in old not in new
-	Appeared []string // ids in new not in old
+	Changed  []string `json:"changed"`  // ids present in both with different Hash
+	Vanished []string `json:"vanished"` // ids in old not in new
+	Appeared []string `json:"appeared"` // ids in new not in old
 }
 
 // idBody is the part of an id after the prefix: "161", "161a", "N3".

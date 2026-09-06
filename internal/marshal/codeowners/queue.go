@@ -26,28 +26,34 @@ import (
 )
 
 // Claim is one task's hold on a path (declared scope or live lease).
+//
+// The json tags are load-bearing: this crosses the wire to the board's marshal
+// panel, which reads snake_case (frontend/src/client/marshal.ts). Without them
+// Go emits its own field names and every rendered row comes out blank — a
+// mismatch that stayed invisible only because the queues these sit in were
+// always empty, so the panel showed its "no chokepoints" note instead.
 type Claim struct {
-	TaskID     int64
-	Identifier string // "CY-12"
-	Title      string
-	Assignee   string // display name or ""
-	Pattern    string
-	Since      time.Time
-	Active     bool // true when a lease is held right now (in progress), false when only declared
-	BlockedBy  []int64
+	TaskID     int64     `json:"task_id"`
+	Identifier string    `json:"identifier"` // "CY-12"
+	Title      string    `json:"title"`
+	Assignee   string    `json:"assignee"` // display name or ""
+	Pattern    string    `json:"pattern"`
+	Since      time.Time `json:"since"`
+	Active     bool      `json:"active"` // true when a lease is held right now (in progress), false when only declared
+	BlockedBy  []int64   `json:"blocked_by"`
 }
 
 // QueueEntry is one task's position on a chokepoint.
 type QueueEntry struct {
-	Position  int // 1 = holds it or is next
-	Claim     Claim
-	WaitingOn []int64 // task ids that must finish first (holders ahead + its own open blockers that are also on the queue)
+	Position  int     `json:"position"` // 1 = holds it or is next
+	Claim     Claim   `json:"claim"`
+	WaitingOn []int64 `json:"waiting_on"` // task ids that must finish first (holders ahead + its own open blockers that are also on the queue)
 }
 
 // Queue is the ordered line of tasks on one chokepoint.
 type Queue struct {
-	Chokepoint string
-	Entries    []QueueEntry
+	Chokepoint string       `json:"chokepoint"`
+	Entries    []QueueEntry `json:"entries"`
 }
 
 // Queues orders every claim that overlaps a chokepoint (using

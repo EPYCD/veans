@@ -57,7 +57,7 @@ func TestInvariantTasksCompletedEpicStaysAContainer(t *testing.T) {
 		t.Fatalf("closed story lost its parent link: done=%v parent=%d", story.Done, story.ParentID)
 	}
 
-	rep := invariants.Check(tasks, leases)
+	rep := invariants.Check(tasks, leases, invariants.Options{})
 	for _, f := range rep.Findings {
 		if f.Code == invariants.CodeNoClaim {
 			t.Fatalf("completed epic flagged as a claimless story: %s", f.Message)
@@ -78,7 +78,8 @@ func TestInvariantTasksChildlessTaskStillNeedsAClaim(t *testing.T) {
 		Tasks: []*client.Task{{ID: 9, Identifier: "#9", Title: "a leaf with no claim"}},
 	}
 
-	rep := invariants.Check(s.InvariantTasks())
+	tasks, leases := s.InvariantTasks()
+	rep := invariants.Check(tasks, leases, invariants.Options{})
 
 	var found bool
 	for _, f := range rep.Findings {

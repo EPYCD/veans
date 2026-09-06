@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"code.vikunja.io/veans/internal/client"
+	"code.vikunja.io/veans/internal/marshal/pathpattern"
 	"code.vikunja.io/veans/internal/output"
 )
 
@@ -91,9 +92,14 @@ identifier, to re-plan around what already exists.`,
 			}
 			plan.DryRun = plan.DryRun || dryRun
 			for _, t := range plan.Tasks {
-				if t.Scope != nil {
-					t.Scope.PathsOwned = withRepoPrefix(rt.cfg.Repository, t.Scope.PathsOwned)
-					t.Scope.PathsAffected = withRepoPrefix(rt.cfg.Repository, t.Scope.PathsAffected)
+				if t.Scope == nil {
+					continue
+				}
+				if t.Scope.PathsOwned, err = pathpattern.CanonicalAll(t.Scope.PathsOwned, rt.cfg.Repository); err != nil {
+					return output.Wrap(output.CodeValidation, err, "task %q paths_owned: %v", t.Title, err)
+				}
+				if t.Scope.PathsAffected, err = pathpattern.CanonicalAll(t.Scope.PathsAffected, rt.cfg.Repository); err != nil {
+					return output.Wrap(output.CodeValidation, err, "task %q paths_affected: %v", t.Title, err)
 				}
 			}
 			res, err := rt.client.ApplyPlan(cmd.Context(), rt.cfg.ProjectID, &plan)

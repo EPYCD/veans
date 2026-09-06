@@ -22,6 +22,15 @@ Server: {{ .Server }}
   the scope first (`veans scope {{ .TaskIDExample }} --paths-owned ... --paths-owned <new>`);
   the server refuses with `CONFLICT` if another task holds it — then split
   the work into a new task instead of editing that file.
+- **Start from current code.** Before you claim anything, fetch and get on top
+  of the integration branch:
+  ```
+  git fetch origin && git rebase origin/main     # or: git pull --rebase
+  ```
+  A session that starts on a week-old checkout writes a week-old diff. You will
+  pass your own gates, open the pull request, and only then find that the file
+  you edited moved under you — and the further in you are, the more expensive
+  that is. Thirty seconds here saves an hour of rebasing later.
 - If a task already exists, claim it: `veans claim {{ .TaskIDExample }}`
   The claim is atomic and exclusive: if another agent already holds the
   task, it has left Todo since you listed it, it is blocked, or one of its
@@ -74,11 +83,35 @@ Server: {{ .Server }}
   veans update {{ .TaskIDExample }} -s in-review \
     --comment '<h3>Summary of Changes</h3><ul><li>first thing</li><li>second thing</li></ul>'
   ```
+- **Never approve or merge a pull request, yours or anyone else's.** Landing
+  work is a human's decision. Open it, enable auto-merge if you like — it
+  cannot land without a human's approval — and leave it.
+- **Then start the next ticket. Do not wait for CI, and do not wait for the
+  merge.** Once the PR is open and the task is in review, the work is handed
+  over: a human enables auto-merge and GitHub merges it when the checks go
+  green, and the merge hook closes the task from the `Refs:` trailer without
+  you. Sitting and watching a ten-minute test run is ten minutes nobody asked
+  you to spend.
+- Two things to know before you walk away, because they are what turns
+  "handed over" into "stalled":
+  - `in-review` does NOT release your leases. If the next ticket you want
+    overlaps the files you just worked on, it will be refused — that is the
+    lease doing its job. Pick a ticket that does not overlap, or wait for the
+    merge after all.
+  - If CI fails on your PR after you have moved on, the task comes back to
+    you. Check the PRs you have open before claiming a third or fourth ticket;
+    a queue of red PRs behind you is worse than having waited.
 - If you abandon work, scrap the task with a reason:
   `veans update {{ .TaskIDExample }} -s scrapped --reason "obsolete: <why>"`
 - Leases are released when the task is done or scrapped. If you stop
   working on a task without finishing it, release its paths so others can
   proceed: `veans release {{ .TaskIDExample }}` (status and assignees stay).
+- If you are NOT going to do the task at all — claimed in error, blocked by
+  something you cannot move, handing off — use
+  `veans unclaim {{ .TaskIDExample }}` instead. Moving the bucket back and
+  releasing leases is NOT enough: a task with an assignee is never ready,
+  whatever bucket it sits in and whatever you wrote on the card, so a
+  half-handed-back ticket is one nobody can pick up.
 
 ## Commit messages
 Include the task identifier on a `Refs:` line so the merge hook can close
@@ -102,6 +135,31 @@ aren't.
 list views, breadcrumbs, and notification subjects; tags would leak
 through as `&lt;p&gt;…&lt;/p&gt;` everywhere. Write
 `fix the bug` not `<p>fix the bug</p>` or `**fix** the bug`.
+
+**Write so a smart fifteen-year-old could follow it.** Descriptions,
+comments and titles are read by people catching up on work they did not do,
+sometimes weeks later, sometimes on a phone. Aim for the level of a good
+newspaper: short sentences, ordinary words, one idea at a time.
+
+- Say what changed and why it matters before any detail of how.
+- Prefer the plain word: "stops", not "precludes"; "we cannot tell", not
+  "it is indeterminate"; "the file two people are editing", not "the
+  contended resource".
+- Expand a name the first time you use it. `paths_owned` means nothing to
+  someone who has not read the docs — "the files this task will edit
+  (`paths_owned`)" costs six words and saves a lookup.
+- Keep jargon you cannot avoid, and explain it once. Do not strip out
+  precision to sound simple: "a merge conflict is certain" is both plain
+  AND exact. "There may be issues" is neither.
+- A comment nobody can act on is a comment nobody needed. End with what
+  happens next, or what someone should do.
+
+Bad:  <p>Refactored the scope-check ingress to canonicalise at the
+      boundary, eliminating dialect divergence.</p>
+Good: <p>Scope paths are now written one way everywhere. Before this, the
+      same file could be listed two different ways and the two would not
+      recognise each other, so two people could edit it at once without
+      either being warned.</p>
 
 Canonical TipTap shapes the web UI renders cleanly:
 
@@ -210,6 +268,8 @@ veans scope {{ .TaskIDExample }} --paths-owned pkg/models/** --paths-affected do
 veans scope {{ .TaskIDExample }} --clear         # drop the scope and its leases
 veans leases                       # who is editing what right now (stale: true = holder inactive)
 veans release {{ .TaskIDExample }}               # give up this task's leases without changing its status
+veans unclaim {{ .TaskIDExample }}               # hand the task back entirely: assignee off, back to Todo, leases dropped, branch label removed
+veans sync {{ .TaskIDExample }}                  # what main has moved under you, by severity, and the commands to catch up
 veans heartbeat {{ .TaskIDExample }}             # mark your leases active during long silent work
 veans check                        # changed files vs your tasks' scopes + others' leases; CONFLICT on strays
 veans check --staged               # same, for the index (pre-commit)
@@ -257,7 +317,20 @@ errors, decide on the warnings, then `veans plan plan.json`.
 - Kanban view: `{{ .ViewID }}`
 - Buckets: Todo=`{{ .Buckets.Todo }}`, In Progress=`{{ .Buckets.InProgress }}`, In Review=`{{ .Buckets.InReview }}`, Done=`{{ .Buckets.Done }}`, Scrapped=`{{ .Buckets.Scrapped }}`
 - Label namespace: `veans:` (auto-prepended; e.g. `--label bug` becomes `veans:bug`)
-- Branch labels: `veans:branch:<branch-name>` — `veans claim` adds the current branch automatically
+- Before opening a PR, run `veans sync {{ .TaskIDExample }}`. If it reports
+  OWNED collisions, the integration branch has moved inside a file you claimed
+  to edit and a conflict is certain — rebase and re-run your gates first.
+  AFFECTED means something you read changed: no conflict, but your assumptions
+  may be stale. It prints commands and never runs them; your worktree is yours.
+- `veans update -s in-review` REFUSES while you are behind in a file you own,
+  and so does the PR check. That is not bureaucracy: the diff a reviewer would
+  read is not the diff that will merge. Rebase, re-run the gates, then move it.
+  `--force` exists for the case where you know the change is trivially
+  rebasable, and posts a comment on the task saying you used it.
+- Branch labels: `veans:branch:<branch-name>` — `veans claim` adds the current branch
+  automatically, UNLESS you are on the repository default branch, where it adds
+  nothing and warns. Branch first, or claim again after branching, or pass
+  `--branch`. A label saying `veans:branch:main` tells the next reader nothing.
 
 The agent prompt above overrides TodoWrite. Anything you would have tracked
 there should live in Vikunja instead, where it stays visible across sessions

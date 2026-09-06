@@ -57,6 +57,9 @@ re-checks references, pastes, stale branches, strays and the invariants.
 				return err
 			}
 			e.SpecRev = specRev
+			if base == "" {
+				base = e.Cfg.IntegrationBranch
+			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			if once {
@@ -66,7 +69,7 @@ re-checks references, pastes, stale branches, strays and the invariants.
 			return s.Run(ctx)
 		},
 	}
-	cmd.Flags().StringVar(&base, "base", "origin/main", "integration branch branches are diffed against")
+	cmd.Flags().StringVar(&base, "base", "", "integration branch branches are diffed against (default: .marshal.yml's integration_branch)")
 	cmd.Flags().StringVar(&specRev, "spec-rev", "origin/main", "revision the spec resolves at; empty reads the working tree")
 	cmd.Flags().BoolVar(&once, "once", false, "run one pass and exit")
 	return cmd

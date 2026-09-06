@@ -22,6 +22,24 @@
 // `pkg/models/*.go`, `frontend/src/**`. Segments are matched with path.Match
 // and `**` matches any number of segments, which is the subset of glob syntax
 // agents actually write and the one whose overlap can be decided cheaply.
+//
+// # The canonical form
+//
+// One spelling per file, because a lease is exclusion and exclusion compares
+// strings. A scope path is canonical when it is:
+//
+//   - relative to the REPOSITORY root, never to a sub-directory of it — an app
+//     that lives in `captain-yard-web/` claims `captain-yard-web/src/x.ts`;
+//   - separated by forward slashes, with no leading `/`, no `./`, no repeated
+//     slashes and no `.` or `..` segment;
+//   - without a trailing slash: a directory claims its subtree either bare
+//     (`pkg/models`) or with an explicit glob (`pkg/models/**`);
+//   - prefixed with `repo:` in a project spanning several repositories.
+//
+// The repository root is the base because git already reports changed files
+// that way and cannot be argued with. Every ingress and every comparison in
+// veans and Marshal goes through Canonical; two spellings of one file are two
+// identities to a lease, an overlap check and a chokepoint queue alike.
 package pathpattern
 
 import (
@@ -33,11 +51,78 @@ import (
 
 const maxLength = 500
 
-// Normalize canonicalises a pattern so equal intents compare equal: trims,
+// Canonical is the single normalisation every scope path passes through, on
+// its way in and before any comparison. It applies repo as the `repo:`
+// namespace of a bare pattern (empty for a single-repository project, and
+// never applied twice), then canonicalises: trims, folds backslashes to `/`,
 // strips a leading `./` or `/`, collapses repeated slashes and drops a
 // trailing slash. It rejects anything that could escape the repository.
-func Normalize(raw string) (string, error) {
+//
+// It does not rebase a path. A path relative to the app sub-directory comes
+// back canonically spelled and still relative to the wrong base — an app_root
+// is where the application lives, never a base for a claim.
+func Canonical(raw, repo string) (string, error) {
 	p := strings.TrimSpace(raw)
+	if repo != "" && p != "" {
+		if existing, _ := SplitRepo(p); existing == "" {
+			p = repo + ":" + p
+		}
+	}
+	return normalize(p, raw)
+}
+
+// CanonicalAll canonicalises a list, dropping blanks and duplicates while
+// keeping the first occurrence's order. It fails on the first bad entry so a
+// caller never half-writes a scope.
+func CanonicalAll(raw []string, repo string) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, r := range raw {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		p, err := Canonical(r, repo)
+		if err != nil {
+			return nil, err
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// CanonicalFiles canonicalises paths that came from git, which prints them
+// relative to the repository root — the canonical base by definition, so in
+// practice this only tidies separators. It is best-effort on purpose: a path
+// git printed cannot be invalid in a way that matters to a scope check, and
+// dropping a changed file to be strict about it would turn a cosmetic problem
+// into a missed collision. The point is that the git side and the claim side
+// of a check reach the comparison through the same function.
+func CanonicalFiles(files []string) []string {
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		c, err := Canonical(f, "")
+		if err != nil {
+			c = f
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// Normalize canonicalises a pattern that already carries whatever `repo:`
+// prefix it should have. It is Canonical with no namespace to apply.
+func Normalize(raw string) (string, error) {
+	return Canonical(raw, "")
+}
+
+// normalize does the work. raw is the string the caller passed, echoed back in
+// errors so a prefixed rewrite never shows up in a message about a path the
+// caller never wrote.
+func normalize(p, raw string) (string, error) {
 	if p == "" {
 		return "", errors.New("invalid scope path: empty")
 	}
@@ -76,6 +161,120 @@ func Normalize(raw string) (string, error) {
 		return repo + ":" + p, nil
 	}
 	return p, nil
+}
+
+// Roots is a repository's statement of what a repository-root-relative path
+// looks like: its top-level entries, plus where the application lives. It is
+// the port of models.ScopeRoots — the board enforces the same rule from the
+// copy Marshal publishes onto the project, and Marshal checks it locally so a
+// bad path is caught before it is written rather than after.
+//
+// Empty Roots means "not declared" and checks nothing.
+type Roots struct {
+	Roots   []string
+	AppRoot string
+	// AppEntries are the app root's own top-level entries. A path starting
+	// with one of these, when the repository root has no such entry, is the
+	// app-relative spelling — the one ambiguity worth refusing.
+	AppEntries []string
+}
+
+// ParseRoots reads the comma-separated forms stored on a project.
+func ParseRoots(roots, appRoot, appEntries string) Roots {
+	return Roots{
+		Roots:      splitList(roots),
+		AppRoot:    strings.Trim(strings.TrimSpace(appRoot), "/"),
+		AppEntries: splitList(appEntries),
+	}
+}
+
+func splitList(raw string) []string {
+	var out []string
+	for _, r := range strings.Split(raw, ",") {
+		if r = strings.Trim(strings.TrimSpace(r), "/"); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// String renders the comma-separated form the board stores.
+func (r Roots) String() string { return strings.Join(r.Roots, ",") }
+
+// AppEntriesString renders the app root's entries the same way.
+func (r Roots) AppEntriesString() string { return strings.Join(r.AppEntries, ",") }
+
+// Declared reports whether there is enough here to check anything. Without the
+// app root's entries there is no ambiguity to detect.
+func (r Roots) Declared() bool { return len(r.Roots) > 0 && len(r.AppEntries) > 0 }
+
+// Check rejects a canonical pattern whose first segment is not a top-level
+// entry of the repository — that is, one written against the wrong base. The
+// pattern must already have been through Canonical: this decides which base it
+// is relative to, not how it is spelled.
+//
+// A first segment carrying a wildcard is accepted whatever it is: "**/logs"
+// and "*.md" are anchored nowhere by construction, so there is no base to be
+// wrong about.
+func (r Roots) Check(pattern string) error {
+	if !r.Declared() {
+		return nil
+	}
+	_, rest := SplitRepo(pattern)
+	first, _, _ := strings.Cut(rest, "/")
+	if first == "" || segmentHasWildcard(first) {
+		return nil
+	}
+	for _, root := range r.Roots {
+		if first == root {
+			return nil
+		}
+	}
+	// Unknown to the repository root AND to the app root: a directory that
+	// does not exist yet, which a task is entitled to claim. Only the
+	// app-relative spelling is refused.
+	var ambiguous bool
+	for _, entry := range r.AppEntries {
+		if first == entry {
+			ambiguous = true
+			break
+		}
+	}
+	if !ambiguous {
+		return nil
+	}
+	if s := r.Suggest(pattern); s != "" {
+		return fmt.Errorf("scope path %q is not canonical: did you mean %q? paths are relative to the repository root (%s)",
+			pattern, s, strings.Join(r.Roots, ", "))
+	}
+	return fmt.Errorf("scope path %q is not canonical: paths are relative to the repository root (%s)",
+		pattern, strings.Join(r.Roots, ", "))
+}
+
+// Suggest offers the app-root-prefixed spelling when the project has an app
+// root that is itself a valid root — the overwhelmingly common way to get this
+// wrong is to write a path as the application sees it. It is a question, never
+// a rewrite.
+func (r Roots) Suggest(pattern string) string {
+	if r.AppRoot == "" {
+		return ""
+	}
+	var appRootIsARoot bool
+	for _, root := range r.Roots {
+		if root == r.AppRoot {
+			appRootIsARoot = true
+			break
+		}
+	}
+	if !appRootIsARoot {
+		return ""
+	}
+	repo, rest := SplitRepo(pattern)
+	candidate := r.AppRoot + "/" + rest
+	if repo != "" {
+		candidate = repo + ":" + candidate
+	}
+	return candidate
 }
 
 // SplitRepo separates an optional `repo:` namespace from a pattern.

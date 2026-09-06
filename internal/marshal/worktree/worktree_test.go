@@ -73,7 +73,7 @@ func TestBuild_DefaultNaming(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "capyard")
 
-	p, err := Build(Naming{}, repo, "E5.3", "A scheduler", "CY-12", 12, "mongodb://127.0.0.1:27101/capyard_w1", 3100)
+	p, err := Build(BuildOptions{RepoRoot: repo, Story: "E5.3", Title: "A scheduler", Identifier: "CY-12", TaskID: 12, Database: "mongodb://127.0.0.1:27101/capyard_w1", Port: 3100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestBuild_DefaultNaming(t *testing.T) {
 }
 
 func TestBuild_NoResources(t *testing.T) {
-	p, err := Build(Naming{}, "/src/capyard", "E5.3", "E5.3 — A scheduler", "", 0, "", 0)
+	p, err := Build(BuildOptions{RepoRoot: "/src/capyard", Story: "E5.3", Title: "E5.3 — A scheduler"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,27 +108,27 @@ func TestBuild_NoResources(t *testing.T) {
 	if len(p.Commands) != 2 || len(p.EnvLines) != 0 {
 		t.Fatalf("expected no env command: %+v", p)
 	}
-	if _, err := Build(Naming{}, "/src/capyard", "E5.3", "A scheduler", "", 0, "", 3100); err != nil {
+	if _, err := Build(BuildOptions{RepoRoot: "/src/capyard", Story: "E5.3", Title: "A scheduler", Port: 3100}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestBuild_StoryFromTitle(t *testing.T) {
-	p, err := Build(Naming{}, "/src/capyard", "", "e0.1 — Bootstrap the repo", "CY-1", 1, "", 0)
+	p, err := Build(BuildOptions{RepoRoot: "/src/capyard", Title: "e0.1 — Bootstrap the repo", Identifier: "CY-1", TaskID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.Story != "E0.1" || p.Branch != "e0.1-bootstrap-repo" || p.Dir != "/src/capyard-e0.1" {
 		t.Fatalf("plan = %+v", p)
 	}
-	if _, err := Build(Naming{}, "/src/capyard", "", "no story here", "CY-1", 1, "", 0); err == nil {
+	if _, err := Build(BuildOptions{RepoRoot: "/src/capyard", Title: "no story here", Identifier: "CY-1", TaskID: 1}); err == nil {
 		t.Fatal("expected an error without a story id")
 	}
 }
 
 func TestBuild_CustomNaming(t *testing.T) {
 	n := Naming{Branch: "feat/{{.Identifier}}-{{.Slug}}", Dir: "/work/{{.Repo}}/{{.Story}} ({{.TaskID}})"}
-	p, err := Build(n, "/src/capyard", "E5.3", "A scheduler", "CY-12", 12, "mongo://x?authSource=admin", 0)
+	p, err := Build(BuildOptions{Naming: n, RepoRoot: "/src/capyard", Story: "E5.3", Title: "A scheduler", Identifier: "CY-12", TaskID: 12, Database: "mongo://x?authSource=admin"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,16 +144,16 @@ func TestBuild_CustomNaming(t *testing.T) {
 		t.Fatalf("Commands =\n%s", strings.Join(p.Commands, "\n"))
 	}
 
-	if _, err := Build(Naming{Branch: "{{.Nope}}"}, "/src/capyard", "E5.3", "x", "", 0, "", 0); err == nil {
+	if _, err := Build(BuildOptions{Naming: Naming{Branch: "{{.Nope}}"}, RepoRoot: "/src/capyard", Story: "E5.3", Title: "x"}); err == nil {
 		t.Fatal("expected an error for an unknown template field")
 	}
-	if _, err := Build(Naming{Dir: "{{.Story"}, "/src/capyard", "E5.3", "x", "", 0, "", 0); err == nil {
+	if _, err := Build(BuildOptions{Naming: Naming{Dir: "{{.Story"}, RepoRoot: "/src/capyard", Story: "E5.3", Title: "x"}); err == nil {
 		t.Fatal("expected a parse error")
 	}
 }
 
 func TestBuild_EmptySlugKeepsBranchClean(t *testing.T) {
-	p, err := Build(Naming{}, "/src/capyard", "E5.3", "", "", 0, "", 0)
+	p, err := Build(BuildOptions{RepoRoot: "/src/capyard", Story: "E5.3"})
 	if err != nil {
 		t.Fatal(err)
 	}

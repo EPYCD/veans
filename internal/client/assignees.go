@@ -25,3 +25,11 @@ import (
 func (c *Client) AddAssignee(ctx context.Context, taskID, userID int64) error {
 	return c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/assignees", taskID), nil, &TaskAssignee{UserID: userID}, nil)
 }
+
+// RemoveAssignee unassigns a user from a task. Claiming had no inverse for
+// long enough that tickets were left permanently unclaimable: the assignee is
+// what makes a task not ready, so a worker who moved the bucket back and
+// dropped its leases had still not handed it back.
+func (c *Client) RemoveAssignee(ctx context.Context, taskID, userID int64) error {
+	return c.Do(ctx, "DELETE", fmt.Sprintf("/tasks/%d/assignees/%d", taskID, userID), nil, nil, nil)
+}

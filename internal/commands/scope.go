@@ -19,11 +19,11 @@ package commands
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"code.vikunja.io/veans/internal/client"
+	"code.vikunja.io/veans/internal/marshal/pathpattern"
 	"code.vikunja.io/veans/internal/output"
 )
 
@@ -62,32 +62,13 @@ func (f *scopeFlags) any() bool {
 	return f.ownedSet || f.affectSet || f.endpSet || f.notesSet
 }
 
-// withRepoPrefix namespaces bare paths with the configured repository so
-// agents in a multi-repo project can keep writing repo-relative paths.
-// Already-prefixed entries pass through untouched.
-func withRepoPrefix(repo string, paths []string) []string {
-	if repo == "" || len(paths) == 0 {
-		return paths
-	}
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		if p == "" || hasRepoPrefix(p) {
-			out = append(out, p)
-			continue
-		}
-		out = append(out, repo+":"+p)
-	}
-	return out
-}
-
-func hasRepoPrefix(p string) bool {
-	i := strings.Index(p, ":")
-	return i > 0 && !strings.ContainsAny(p[:i], "/\\*?[")
-}
-
-// apply folds the passed flags into base and returns the scope to PUT.
-func (f *scopeFlags) apply(base *client.TaskScope) *client.TaskScope {
+// apply folds the passed flags into base and returns the scope to PUT. Every
+// path the caller passed goes through pathpattern.Canonical first: it applies
+// the configured repository namespace to bare paths and canonicalises the
+// spelling, so what is stored is what a lease, an overlap check and a
+// chokepoint queue will all compare later. A path that cannot be canonicalised
+// is an error here rather than a claim on a file nobody meant to claim.
+func (f *scopeFlags) apply(base *client.TaskScope) (*client.TaskScope, error) {
 	out := &client.TaskScope{
 		PathsOwned:    []string{},
 		PathsAffected: []string{},
@@ -106,10 +87,18 @@ func (f *scopeFlags) apply(base *client.TaskScope) *client.TaskScope {
 		out.Notes = base.Notes
 	}
 	if f.ownedSet {
-		out.PathsOwned = withRepoPrefix(f.repo, f.owned)
+		owned, err := pathpattern.CanonicalAll(f.owned, f.repo)
+		if err != nil {
+			return nil, output.Wrap(output.CodeValidation, err, "--paths-owned: %v", err)
+		}
+		out.PathsOwned = owned
 	}
 	if f.affectSet {
-		out.PathsAffected = withRepoPrefix(f.repo, f.affected)
+		affected, err := pathpattern.CanonicalAll(f.affected, f.repo)
+		if err != nil {
+			return nil, output.Wrap(output.CodeValidation, err, "--paths-affected: %v", err)
+		}
+		out.PathsAffected = affected
 	}
 	if f.endpSet {
 		out.Endpoints = f.endpoints
@@ -117,7 +106,7 @@ func (f *scopeFlags) apply(base *client.TaskScope) *client.TaskScope {
 	if f.notesSet {
 		out.Notes = f.notes
 	}
-	return out
+	return out, nil
 }
 
 func newScopeCmd() *cobra.Command {
@@ -133,8 +122,18 @@ for the project, and any other task whose paths-owned overlap an active lease
 cannot be claimed until the holder is done or released. Everything else is
 context for the agent working the task.
 
-Paths are repository-relative. Globs: * matches within a segment, ** across
-segments; a bare directory such as pkg/models covers its whole subtree.`,
+Paths are canonical: relative to the REPOSITORY root, forward slashes, no
+leading "/", no "./", no ".." and no trailing slash. When the app lives in a
+sub-directory the sub-directory is part of the path — an app in
+captain-yard-web/ claims "captain-yard-web/src/db/schema.ts", never
+"src/db/schema.ts". Globs: * matches within a segment, ** across segments;
+a bare directory such as pkg/models covers its whole subtree. In a project
+spanning several repositories a "repo:" prefix comes first, and .veans.yml's
+repository adds it to bare paths for you.
+
+The repository root is the base because that is what git prints, and a lease
+is exclusion enforced by comparing strings: two spellings of one file are two
+claims that cannot see each other.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := loadRuntime()
@@ -182,5 +181,9 @@ func setScope(ctx context.Context, rt *runtime, id int64, f *scopeFlags) (*clien
 	if err != nil {
 		return nil, err
 	}
-	return rt.client.PutTaskScope(ctx, id, f.apply(current))
+	scope, err := f.apply(current)
+	if err != nil {
+		return nil, err
+	}
+	return rt.client.PutTaskScope(ctx, id, scope)
 }

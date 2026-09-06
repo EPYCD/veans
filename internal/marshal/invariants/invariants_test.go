@@ -22,6 +22,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"code.vikunja.io/veans/internal/marshal/pathpattern"
 )
 
 // board mirrors the brief: two ordered overlaps, one unordered, a blocked
@@ -57,7 +59,7 @@ func summarize(findings []Finding) []string {
 
 func TestCheckBoard(t *testing.T) {
 	tasks, leases := board()
-	r := Check(tasks, leases)
+	r := Check(tasks, leases, Options{})
 
 	if r.Tasks != 8 || r.Containers != 1 || r.Collisions != 1 || r.Cycles != 1 || r.OK {
 		t.Errorf("counts: tasks=%d containers=%d collisions=%d cycles=%d ok=%v", r.Tasks, r.Containers, r.Collisions, r.Cycles, r.OK)
@@ -87,12 +89,98 @@ func TestCheckBoard(t *testing.T) {
 
 func TestCheckIsDeterministic(t *testing.T) {
 	tasks, leases := board()
-	first := Check(tasks, leases)
+	first := Check(tasks, leases, Options{})
 	slices.Reverse(tasks)
 	slices.Reverse(leases)
-	second := Check(tasks, leases)
+	second := Check(tasks, leases, Options{})
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("order-dependent report:\n%+v\n%+v", first, second)
+	}
+}
+
+// TestCheckPathCanonicality is the path-canonicality invariant: no stored
+// pattern may differ from its canonical form, and none may be written against
+// a base that is not the repository root. It catches a regression in any
+// producer, including one added after this was written — "every producer goes
+// through the one function" is a convention until something asserts it.
+func TestCheckPathCanonicality(t *testing.T) {
+	opts := Options{Roots: pathpattern.ParseRoots("app,docs,.github", "app", "src,packages")}
+	tasks := []Task{
+		{ID: 1, Paths: []string{"app/src/x.ts"}},
+		// Spelled differently from how it would be stored today.
+		{ID: 2, Paths: []string{"./app/src//y.ts"}},
+		// Canonically spelled, but relative to the application rather than the
+		// repository — the shape that put two live leases on one file.
+		{ID: 3, Paths: []string{"src/z.ts"}},
+		// Anchored nowhere, so there is no base to be wrong about.
+		{ID: 4, Paths: []string{"**/*.md"}},
+	}
+	r := Check(tasks, nil, opts)
+
+	got := summarize(r.Findings)
+	want := []string{
+		"non_canonical_path [2] [./app/src//y.ts]",
+		"non_canonical_path [3] [src/z.ts]",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("findings = %q, want %q", got, want)
+	}
+	if r.OK {
+		t.Error("a claim that is not canonical must fail the report, not warn")
+	}
+	for _, f := range r.Findings {
+		if f.TaskIDs[0] == 3 && !strings.Contains(f.Message, `"app/src/z.ts"`) {
+			t.Errorf("the finding for a wrong base should name the spelling meant: %s", f.Message)
+		}
+	}
+
+	// A live lease is checked too: it is the thing exclusion is actually
+	// enforced on, so a lease nobody could collide with is the worst version
+	// of this bug.
+	r = Check([]Task{{ID: 1, Paths: []string{"app/a.ts"}}}, []Lease{{TaskID: 1, Pattern: "src/a.ts"}}, opts)
+	if len(r.Findings) != 1 || r.Findings[0].Code != CodeNonCanonicalPath {
+		t.Errorf("a lease on a non-canonical path must be a finding: %q", summarize(r.Findings))
+	}
+
+	// A repository that has published no roots cannot have this decided for
+	// it, and a check that cannot be decided must not be failed.
+	r = Check(tasks, nil, Options{})
+	for _, f := range r.Findings {
+		if f.Code == CodeNonCanonicalPath && f.TaskIDs[0] == 3 {
+			t.Error("without declared roots there is no way to know which base was meant")
+		}
+	}
+}
+
+// TestCheckChokepointReachability is the invariant whose absence let an
+// always-empty queue ship and stay shipped for the life of the feature. A
+// queue with nothing in it looks exactly like a queue with nothing to report,
+// so no amount of reading the output finds this; only asking whether the
+// question is answerable does.
+func TestCheckChokepointReachability(t *testing.T) {
+	opts := Options{
+		Roots: pathpattern.ParseRoots("app,docs,.github", "app", "src,packages"),
+		// What CODEOWNERS ingestion used to produce on a project with an
+		// app_root: the anchoring root stripped off, leaving a pattern in a
+		// namespace no claim is ever stored in.
+		Chokepoints: []string{"src/server/db/repo.ts", "app/src/lib/contract.ts", ".github/**"},
+	}
+	tasks := []Task{{ID: 1, Paths: []string{"app/src/server/db/repo.ts"}}}
+	r := Check(tasks, nil, opts)
+
+	got := summarize(r.Findings)
+	want := []string{"unreachable_chokepoint [] [src/server/db/repo.ts]"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("findings = %q, want %q", got, want)
+	}
+	if r.OK {
+		t.Error("a chokepoint nothing can queue on must fail the report")
+	}
+
+	// The fixed ingestion keeps every chokepoint in the claims' namespace.
+	opts.Chokepoints = []string{"app/src/server/db/repo.ts", "app/src/lib/contract.ts", ".github/**"}
+	if r := Check(tasks, nil, opts); !r.OK || len(r.Findings) != 0 {
+		t.Errorf("canonical chokepoints must be clean: %q", summarize(r.Findings))
 	}
 }
 
@@ -105,7 +193,7 @@ func TestCheckCleanBoard(t *testing.T) {
 		{ID: 4, Paths: []string{"docs/**"}, BlockedBy: []int64{5}},
 		{ID: 5, Done: true, Paths: []string{"docs/**"}},
 	}
-	r := Check(tasks, nil)
+	r := Check(tasks, nil, Options{})
 	if !r.OK || len(r.Findings) != 0 {
 		t.Errorf("clean board reported %q", summarize(r.Findings))
 	}
@@ -125,7 +213,7 @@ func TestCheckParentWithPaths(t *testing.T) {
 		// Siblings are not ordered by sharing a parent.
 		{ID: 4, ParentID: 1, Paths: []string{"src/server/auth/login.ts"}},
 	}
-	r := Check(tasks, nil)
+	r := Check(tasks, nil, Options{})
 	want := []string{
 		"parent_with_paths [1] [src/server/auth/**]",
 		"unordered_overlap [3 4] [src/server/auth/login.ts]",
@@ -151,7 +239,7 @@ func TestCheckWarningsKeepOK(t *testing.T) {
 		{ID: 3, Done: true},
 	}
 	leases := []Lease{{TaskID: 1, Pattern: "a/**", Stale: true}, {TaskID: 3, Pattern: "x"}}
-	r := Check(tasks, leases)
+	r := Check(tasks, leases, Options{})
 	if !r.OK {
 		t.Errorf("warnings alone must not fail the report: %q", summarize(r.Findings))
 	}
@@ -169,7 +257,7 @@ func TestCheckCycleThroughFollows(t *testing.T) {
 		{ID: 5, Paths: []string{"e"}, BlockedBy: []int64{6}},
 		{ID: 6, Paths: []string{"f"}, BlockedBy: []int64{5}},
 	}
-	r := Check(tasks, nil)
+	r := Check(tasks, nil, Options{})
 	want := []string{"blocked_cycle [1 2 3] []", "blocked_cycle [5 6] []"}
 	if got := summarize(r.Findings); !reflect.DeepEqual(got, want) {
 		t.Errorf("findings = %q, want %q", got, want)
@@ -180,7 +268,7 @@ func TestCheckCycleThroughFollows(t *testing.T) {
 }
 
 func TestCheckEmpty(t *testing.T) {
-	r := Check(nil, nil)
+	r := Check(nil, nil, Options{})
 	if !r.OK || r.Tasks != 0 || len(r.Findings) != 0 || r.UnblockedRoots != nil {
 		t.Errorf("empty report = %+v", r)
 	}

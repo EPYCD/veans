@@ -59,6 +59,99 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// TestCanonical is the contract every scope path is held to, everywhere it is
+// written or compared. Canonical is the one function; Normalize is it with no
+// repository namespace to apply.
+func TestCanonical(t *testing.T) {
+	// One table, three implementations. The shell copy of this rule lives in
+	// .github/actions/workman-merge-hook/common.sh and is tested against the
+	// same cases by canonical-path_test.sh; when one changes, all three do.
+	cases := []struct {
+		raw, repo, want string
+	}{
+		// Already canonical — git's own output must survive untouched.
+		{"pkg/models/tasks.go", "", "pkg/models/tasks.go"},
+		{"captain-yard-web/src/server/db/repo.ts", "", "captain-yard-web/src/server/db/repo.ts"},
+		{".github/workflows/test.yml", "", ".github/workflows/test.yml"},
+		{"frontend/src/**", "", "frontend/src/**"},
+
+		// Spellings that must collapse onto one identity.
+		{"./pkg/models/tasks.go", "", "pkg/models/tasks.go"},
+		{"/pkg/models/tasks.go", "", "pkg/models/tasks.go"},
+		{".//pkg//models/tasks.go", "", "pkg/models/tasks.go"},
+		{"pkg/models/", "", "pkg/models"},
+		{"pkg\\models\\tasks.go", "", "pkg/models/tasks.go"},
+		{"  frontend/src/**  ", "", "frontend/src/**"},
+
+		// The repository namespace: applied to a bare path, never twice, and
+		// never to a path that already names a repository.
+		{"pkg/models/**", "api", "api:pkg/models/**"},
+		{" docs/x.md ", "api", "api:docs/x.md"},
+		{"web:src/App.vue", "api", "web:src/App.vue"},
+		{"api:pkg/models/**", "api", "api:pkg/models/**"},
+		{"./src//App.vue", "web", "web:src/App.vue"},
+
+		// NOT rebased. "src/server/db/repo.ts" is a different file from
+		// "captain-yard-web/src/server/db/repo.ts" and stays one: an app_root
+		// is where the application lives, not a base for a claim, and guessing
+		// which the caller meant is how a claim lands on a file nobody meant
+		// to claim.
+		{"src/server/db/repo.ts", "", "src/server/db/repo.ts"},
+	}
+	for _, c := range cases {
+		got, err := Canonical(c.raw, c.repo)
+		if err != nil {
+			t.Errorf("Canonical(%q, %q): unexpected error %v", c.raw, c.repo, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("Canonical(%q, %q) = %q, want %q", c.raw, c.repo, got, c.want)
+		}
+		// Canonicalising a canonical path must be a no-op, or "already stored"
+		// and "just written" could differ.
+		again, err := Canonical(got, c.repo)
+		if err != nil || again != got {
+			t.Errorf("Canonical(%q, %q) is not idempotent: %q, %v", got, c.repo, again, err)
+		}
+	}
+
+	// A path that could escape the repository, name nothing, or carry a
+	// namespace that is not a name is refused rather than repaired.
+	bad := []struct{ raw, repo string }{
+		{"", ""}, {"   ", ""}, {"/", ""}, {".", ""}, {"./", ""},
+		{"../etc/passwd", ""}, {"pkg/../secrets", ""}, {"pkg/./x", ""},
+		{"a\nb", ""}, {"api:", ""}, {"bad repo:pkg/x", ""}, {"api:../x", ""},
+		{"../escape", "api"}, {"", "api"},
+	}
+	for _, c := range bad {
+		if got, err := Canonical(c.raw, c.repo); err == nil {
+			t.Errorf("Canonical(%q, %q) = %q, must be rejected", c.raw, c.repo, got)
+		}
+	}
+}
+
+// TestCanonicalAll pins the list form: blanks dropped, duplicates folded once
+// they canonicalise to the same identity, order of first appearance kept, and
+// one bad entry failing the whole list rather than half-writing a scope.
+func TestCanonicalAll(t *testing.T) {
+	got, err := CanonicalAll([]string{"./pkg/models//**", "", "  ", "pkg/models/**", "docs/x.md"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"pkg/models/**", "docs/x.md"}
+	if len(got) != len(want) {
+		t.Fatalf("CanonicalAll = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CanonicalAll = %v, want %v", got, want)
+		}
+	}
+	if _, err := CanonicalAll([]string{"pkg/x", "../escape"}, ""); err == nil {
+		t.Fatal("one invalid entry must fail the whole list")
+	}
+}
+
 func TestOverlap(t *testing.T) {
 	overlap := [][2]string{
 		{"api:pkg/models/**", "api:pkg/models/tasks.go"},

@@ -33,9 +33,17 @@ description: |
 inputs:
   token:
     description: |
-      A Workman API token allowed to read tasks, update tasks, move them
-      between buckets and create comments on the project — the bot token
-      minted by `veans init` is sufficient. Store it as a repository secret.
+      A Workman API token allowed to read and update tasks, move them between
+      buckets, comment, post gate receipts, and — for `mode: check` — call the
+      project's scope-check endpoint.
+
+      Use the CI token `marshal setup` prints, stored as the repository secret
+      WORKMAN_TOKEN. That is the token these grants are minted for. The worker
+      token `veans login` puts in your credential store is a different account
+      with a different grant; it is not what CI should run as, and a token
+      minted before scope-check was added to the CI grant will 401 on
+      `mode: check` alone while every other mode keeps working. Re-run
+      `marshal setup --rotate` to mint one that carries it.
     required: true
   mode:
     description: What to do — close, opened, check, ci-failed or receipt.

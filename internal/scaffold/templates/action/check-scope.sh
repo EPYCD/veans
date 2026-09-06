@@ -14,7 +14,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 FAIL_ON_VIOLATION="${FAIL_ON_VIOLATION:-true}"
 
 require_commits
-mapfile -t files < <(git diff --name-only --diff-filter=ACMRD "$BASE_SHA"..."$HEAD_SHA")
+# The same normalisation the claim side went through, so the comparison the
+# board makes is between two spellings of one dialect rather than two dialects.
+mapfile -t files < <(git diff --name-only --diff-filter=ACMRD "$BASE_SHA"..."$HEAD_SHA" | canonical_paths)
 if [[ ${#files[@]} -eq 0 ]]; then
 	log "No files changed between $BASE_SHA and $HEAD_SHA — nothing to check."
 	echo "ok=true" >> "${GITHUB_OUTPUT:-/dev/null}"
@@ -63,6 +65,54 @@ if [[ -n "$table" ]]; then
 |---|---|---|
 $table"
 fi
+# ---------------------------------------------------------------------------
+# The review gate.
+#
+# A branch behind the integration branch in a file it OWNS will conflict, so
+# the diff under review is not the diff that will merge and the gates that
+# just passed did not run against what will land. That is worth failing a PR
+# check for.
+#
+# `affected` is NOT a gate, here or anywhere. Those collisions are common and
+# usually harmless, and failing on them would train everyone to override by
+# reflex — which would then defeat the gate on `owned` too. They are reported
+# and nothing more.
+#
+# Lag is computed by Marshal on its poll, so a board that has never had it
+# computed reports nothing and gates nothing. A gate that cannot be evaluated
+# is not a gate.
+# ---------------------------------------------------------------------------
+lag_rows=""
+lag_owned=0
+for id in "${task_ids[@]:-}"; do
+	[[ "$id" =~ ^[0-9]+$ ]] || continue
+	status="$(api GET "/tasks/$id/lag")"
+	[[ "$status" =~ ^2 ]] || continue
+	severity="$(jq -r '.severity // ""' "$API_BODY")"
+	[[ -n "$severity" ]] || continue
+	base="$(jq -r '.base // "the integration branch"' "$API_BODY")"
+	while IFS=$'\t' read -r path landed; do
+		[[ -n "$path" ]] || continue
+		lag_rows+="| \`$path\` | owned | $landed |"$'\n'
+		lag_owned=$((lag_owned + 1))
+	done < <(jq -r '(.collisions // [])[] | select(.severity == "owned") | "\(.path)\t\(.landed_by_identifier // .landed_in_sha // "an unknown commit")"' "$API_BODY")
+	while IFS=$'\t' read -r path landed; do
+		[[ -n "$path" ]] || continue
+		lag_rows+="| \`$path\` | affected | $landed |"$'\n'
+	done < <(jq -r '(.collisions // [])[] | select(.severity == "affected") | "\(.path)\t\(.landed_by_identifier // .landed_in_sha // "an unknown commit")"' "$API_BODY")
+done
+
+if [[ -n "$lag_rows" ]]; then
+	summary+="
+
+### Behind $base
+
+| File | Severity | Landed by |
+|---|---|---|
+$lag_rows"
+fi
+echo "lag_owned=$lag_owned" >> "${GITHUB_OUTPUT:-/dev/null}"
+
 [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n' "$summary" >> "$GITHUB_STEP_SUMMARY"
 gh_upsert_comment "<!-- workman-scope-check -->" "$summary"
 
@@ -70,6 +120,13 @@ if [[ "$ok" != "true" ]]; then
 	msg="$strays file(s) outside the referenced tasks' paths_owned, $collisions leased by another task"
 	if [[ "$FAIL_ON_VIOLATION" == "true" ]]; then
 		fail "$msg — widen the task's scope, split the work, or reference the task that owns the file"
+	fi
+	warn "$msg"
+fi
+if [[ "$lag_owned" -gt 0 ]]; then
+	msg="this branch is behind $base in $lag_owned file(s) it owns — a conflict is certain, so the diff under review is not the diff that will merge"
+	if [[ "$FAIL_ON_VIOLATION" == "true" ]]; then
+		fail "$msg — rebase onto $base and re-run the gates"
 	fi
 	warn "$msg"
 fi

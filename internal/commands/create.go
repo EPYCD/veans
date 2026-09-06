@@ -44,7 +44,27 @@ func newCreateCmd() *cobra.Command {
 		Use:     "create <title>",
 		Aliases: []string{"c"},
 		Short:   "Create a new task",
-		Args:    cobra.ExactArgs(1),
+		Long: `Creates a task and, when scope flags are passed, writes its scope in the
+same breath.
+
+--paths-owned is the enforced part: claiming the task leases those globs, and
+another task whose paths-owned overlap a live lease cannot be claimed until
+the holder is done. --paths-affected is what the task reads but will not edit;
+it is advisory today and is what a staleness check reads tomorrow.
+
+Paths are canonical: relative to the REPOSITORY root, forward slashes, no
+leading "/", no "./", no ".." and no trailing slash. When the app lives in a
+sub-directory the sub-directory is part of the path — an app in
+captain-yard-web/ claims "captain-yard-web/src/db/schema.ts", never
+"src/db/schema.ts". Globs: * matches within a segment, ** across segments;
+a bare directory such as pkg/models covers its whole subtree. In a project
+spanning several repositories a "repo:" prefix comes first, and .veans.yml's
+repository adds it to bare paths for you.
+
+The repository root is the base because that is what git prints, and a lease
+is exclusion enforced by comparing strings: two spellings of one file are two
+claims that cannot see each other.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := loadRuntime()
 			if err != nil {
@@ -139,7 +159,11 @@ func runCreate(ctx context.Context, rt *runtime, title string, f *createFlags) (
 	// into in-progress (and therefore claimed later, not now) carries its
 	// paths from the first read.
 	if f.scope.any() {
-		if _, err := rt.client.PutTaskScope(ctx, created.ID, f.scope.apply(nil)); err != nil {
+		scope, err := f.scope.apply(nil)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := rt.client.PutTaskScope(ctx, created.ID, scope); err != nil {
 			return nil, err
 		}
 	}

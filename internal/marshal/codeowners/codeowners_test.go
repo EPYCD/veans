@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"code.vikunja.io/veans/internal/marshal/pathpattern"
 )
 
 func loadCaptainYard(t *testing.T) *File {
@@ -134,35 +136,46 @@ func TestMatchesCaptainYard(t *testing.T) {
 func TestChokepointsCaptainYard(t *testing.T) {
 	f := loadCaptainYard(t)
 
-	inside, outside := f.Chokepoints("captain-yard-web")
-	wantInside := []string{
-		"src/lib/contract.ts",
-		"src/lib/contract-routes.ts",
-		"src/server/db/schema.ts",
-		"src/server/db/repo.ts",
-		"src/server/db/indexes.ts",
-		"src/server/auth/**",
-		"packages/engine/**",
+	// Canonical form: repository-root-relative, exactly as the board holds a
+	// claim. app_root is not a base for a claim and never rebases these.
+	want := []string{
+		"captain-yard-web/src/lib/contract.ts",
+		"captain-yard-web/src/lib/contract-routes.ts",
+		"captain-yard-web/src/server/db/schema.ts",
+		"captain-yard-web/src/server/db/repo.ts",
+		"captain-yard-web/src/server/db/indexes.ts",
+		"captain-yard-web/src/server/auth/**",
+		"captain-yard-web/packages/engine/**",
+		".github/**",
 	}
-	if !reflect.DeepEqual(inside, wantInside) {
-		t.Errorf("inside = %v, want %v", inside, wantInside)
+	if got := f.Chokepoints(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Chokepoints() = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(outside, []string{".github/**"}) {
-		t.Errorf("outside = %v", outside)
-	}
+}
 
-	inside, outside = f.Chokepoints("")
-	if len(inside) != 8 || inside[0] != "captain-yard-web/src/lib/contract.ts" || inside[7] != ".github/**" {
-		t.Errorf("root-less inside = %v", inside)
+// TestChokepointsAreClaimable is the invariant whose absence let an
+// always-empty queue ship: every chokepoint must live in the same namespace as
+// a stored claim, so a lease on the file a chokepoint names can be seen from
+// the chokepoint. Before app_root stopped being stripped, every one of these
+// failed on a project that set one.
+func TestChokepointsAreClaimable(t *testing.T) {
+	f := loadCaptainYard(t)
+	// What the pre-commit hook accepts, because git prints it: a path from the
+	// repository root.
+	leased := "captain-yard-web/src/server/db/repo.ts"
+	for _, cp := range f.Chokepoints() {
+		if _, err := pathpattern.Normalize(cp); err != nil {
+			t.Errorf("chokepoint %q is not a valid scope path: %v", cp, err)
+		}
 	}
-	if outside != nil {
-		t.Errorf("root-less outside = %v", outside)
+	var reached bool
+	for _, cp := range f.Chokepoints() {
+		if pathpattern.Overlap(cp, leased) {
+			reached = true
+		}
 	}
-
-	// A trailing slash on the root is tolerated.
-	inside, _ = f.Chokepoints("captain-yard-web/")
-	if !reflect.DeepEqual(inside, wantInside) {
-		t.Errorf("inside with slashed root = %v", inside)
+	if !reached {
+		t.Fatalf("no chokepoint overlaps a live claim on %q — the queue for it can never be non-empty", leased)
 	}
 }
 
@@ -218,24 +231,9 @@ func TestMatchesGitHubSemantics(t *testing.T) {
 		}
 	}
 
-	inside, outside := f.Chokepoints("")
-	wantInside := []string{"**/*.md", "docs/*", "build/logs/**", "**/apps/**", "**/logs", "src/*/lib", "**/foo", "apps/github"}
-	if !reflect.DeepEqual(inside, wantInside) {
-		t.Errorf("inside = %v, want %v", inside, wantInside)
-	}
-	if outside != nil {
-		t.Errorf("outside = %v", outside)
-	}
-
-	// Unanchored patterns apply below any root; anchored ones under the root
-	// lose the prefix; anchored ones elsewhere fall outside.
-	inside, outside = f.Chokepoints("src")
-	wantInside = []string{"**/*.md", "**/apps/**", "**/logs", "*/lib", "**/foo"}
-	if !reflect.DeepEqual(inside, wantInside) {
-		t.Errorf("inside(src) = %v, want %v", inside, wantInside)
-	}
-	if !reflect.DeepEqual(outside, []string{"docs/*", "build/logs/**", "apps/github"}) {
-		t.Errorf("outside(src) = %v", outside)
+	want := []string{"**/*.md", "docs/*", "build/logs/**", "**/apps/**", "**/logs", "src/*/lib", "**/foo", "apps/github"}
+	if got := f.Chokepoints(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Chokepoints() = %v, want %v", got, want)
 	}
 }
 
@@ -245,9 +243,8 @@ func TestChokepointsDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inside, _ := f.Chokepoints("")
-	if want := []string{"a/b/**", "**/b/**", "**"}; !reflect.DeepEqual(inside, want) {
-		t.Errorf("inside = %v, want %v", inside, want)
+	if want := []string{"a/b/**", "**/b/**", "**"}; !reflect.DeepEqual(f.Chokepoints(), want) {
+		t.Errorf("Chokepoints() = %v, want %v", f.Chokepoints(), want)
 	}
 }
 
@@ -260,6 +257,50 @@ func TestParseErrors(t *testing.T) {
 	f, err := Parse([]byte("\n# only comments\n\n"))
 	if err != nil || len(f.Rules) != 0 {
 		t.Errorf("comment-only file: rules=%v err=%v", f.Rules, err)
+	}
+}
+
+// TestChokepointQueueContainsTheLeaseHolder is regression test 3 of the brief,
+// end to end: a CODEOWNERS entry "/app/src/x.ts" and a live lease on
+// "app/src/x.ts" must put that task on the chokepoint's queue.
+//
+// It would have failed from the day the feature shipped until the day
+// app_root stopped being stripped, on every project that sets one. Nothing
+// noticed, because a queue with no rows in it and a queue with nothing to
+// report render identically — which is the whole reason the reachability
+// invariant now exists rather than being left as a follow-up.
+func TestChokepointQueueContainsTheLeaseHolder(t *testing.T) {
+	f, err := Parse([]byte("/app/src/x.ts @owner\n/app/src/lib/ @owner\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	claims := []Claim{
+		// Spelled the only way the pre-commit hook accepts: from the
+		// repository root, exactly as git prints it.
+		{TaskID: 46, Identifier: "#46", Title: "The write door", Pattern: "app/src/x.ts", Since: since, Active: true},
+		{TaskID: 51, Identifier: "#51", Title: "The depot-pinned login", Pattern: "app/src/lib/contract.ts", Since: since},
+	}
+
+	queues := Queues(f.Chokepoints(), claims)
+	if len(queues) != 2 {
+		t.Fatalf("got %d queues, want 2", len(queues))
+	}
+
+	if queues[0].Chokepoint != "app/src/x.ts" {
+		t.Errorf("chokepoint = %q, want the repository-root-relative form", queues[0].Chokepoint)
+	}
+	if len(queues[0].Entries) != 1 {
+		t.Fatalf("the queue for a file with a live lease on it must not be empty: %+v", queues[0])
+	}
+	got := queues[0].Entries[0]
+	if got.Claim.TaskID != 46 || !got.Claim.Active || got.Position != 1 {
+		t.Errorf("entry = %+v, want #46 holding position 1", got)
+	}
+
+	// The directory rule reaches the file below it, in the same namespace.
+	if len(queues[1].Entries) != 1 || queues[1].Entries[0].Claim.TaskID != 51 {
+		t.Errorf("queue for %q = %+v", queues[1].Chokepoint, queues[1].Entries)
 	}
 }
 

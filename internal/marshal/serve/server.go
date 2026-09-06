@@ -280,7 +280,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ *client.
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Engine.Health(snap))
+	writeJSON(w, http.StatusOK, s.Engine.Health(r.Context(), snap))
 }
 
 func (s *Server) handleChokepoints(w http.ResponseWriter, r *http.Request, _ *client.User) {
@@ -322,7 +322,14 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request, _ *client.Us
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": path, "holders": holders})
+	// The path answered about, not the one asked with: the board panel shows
+	// this back to a human deciding whether a file is free.
+	queried, err := s.Engine.CanonicalPath(path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": queried, "holders": holders})
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request, _ *client.User) {

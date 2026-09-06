@@ -177,13 +177,40 @@ func taskHasLabel(t *client.Task, title string) bool {
 	return false
 }
 
+// branchLabelPrefix namespaces the label claim attaches so unclaim can find
+// it again without matching anything a human wrote.
+const branchLabelPrefix = "veans:branch:"
+
 func branchLabel(branch string) string {
-	return "veans:branch:" + branch
+	return branchLabelPrefix + branch
 }
 
 // currentGitBranch returns the current git branch as reported by
 // `git rev-parse --abbrev-ref HEAD`, or "" if we're not in a git repo or
 // HEAD is detached. Failures are silent so callers can decide.
+// defaultBranch reports the repository's default branch, or "" when it cannot
+// be determined. Asked of git rather than assumed: "main" is a convention, not
+// a rule, and guessing wrong would either warn about a real feature branch or
+// stay quiet about the default one.
+//
+// origin/HEAD is the authority when it is set, which is whenever the clone
+// came from `git clone`. It is often absent in CI checkouts and in
+// hand-assembled repositories, so fall back to whichever conventional name
+// actually exists as a remote branch.
+func defaultBranch(ctx context.Context) string {
+	if out, err := runGit(ctx, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		if name := strings.TrimPrefix(strings.TrimSpace(out), "origin/"); name != "" {
+			return name
+		}
+	}
+	for _, candidate := range []string{"main", "master", "trunk"} {
+		if _, err := runGit(ctx, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func currentGitBranch(ctx context.Context) string {
 	out, err := runGit(ctx, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {

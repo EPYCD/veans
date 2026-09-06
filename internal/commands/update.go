@@ -19,6 +19,8 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -44,6 +46,9 @@ type updateFlags struct {
 	comment          string
 	reason           string
 	ifUnchangedSince string
+	// force overrides the review gate: a branch behind the integration branch
+	// in a file it owns is normally refused entry to review.
+	force bool
 }
 
 func newUpdateCmd() *cobra.Command {
@@ -84,6 +89,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&f.comment, "comment", "c", "", "post a comment as part of this update")
 	cmd.Flags().StringVar(&f.reason, "reason", "", "rationale (required when --status scrapped)")
 	cmd.Flags().StringVar(&f.ifUnchangedSince, "if-unchanged-since", "", "RFC3339 timestamp; abort if the task has changed since")
+	cmd.Flags().BoolVar(&f.force, "force", false, "send to review even though the branch is behind in a file it owns (recorded as a comment on the task)")
 	return cmd
 }
 
@@ -123,6 +129,19 @@ func runUpdate(ctx context.Context, rt *runtime, id int64, f *updateFlags) (*cli
 		newStatus = s
 		if s == status.Scrapped && strings.TrimSpace(f.reason) == "" {
 			return nil, output.New(output.CodeValidation, "--reason is required when --status scrapped")
+		}
+	}
+
+	// The review gate. A branch behind the integration branch in a file it
+	// owns is not ready to be reviewed: the conflict is certain, so the diff
+	// a reviewer reads is not the diff that will merge, and the gates that
+	// just passed did not run against what will land.
+	//
+	// Checked before anything is written, so a refused transition changes
+	// nothing at all.
+	if newStatus == status.InReview {
+		if err := checkReviewLag(ctx, rt, id, current, f); err != nil {
+			return nil, err
 		}
 	}
 
@@ -228,6 +247,41 @@ func runUpdate(ctx context.Context, rt *runtime, id int64, f *updateFlags) (*cli
 	}
 
 	return updated, nil
+}
+
+// checkReviewLag refuses entry to review while the task is behind in a file it
+// owns, unless --force. The override is recorded on the task rather than only
+// in the operator's shell history: a branch that went to review knowingly
+// stale is something the next reader needs to know about, and Marshal's
+// ledger picks the comment up from the board's webhook.
+//
+// A board that has never had lag computed for this task returns nothing, and
+// nothing is what it gates.
+func checkReviewLag(ctx context.Context, rt *runtime, id int64, current *client.Task, f *updateFlags) error {
+	lag, err := rt.client.GetTaskLag(ctx, id)
+	if err != nil {
+		// Lag is advisory infrastructure: an older board that does not serve
+		// it, or one that is briefly unreachable, must not stop work moving.
+		return nil //nolint:nilerr // a gate that cannot be evaluated is not a gate
+	}
+	if !lag.Blocking() {
+		return nil
+	}
+	if !f.force {
+		return lagRefusal(current, lag)
+	}
+	var b strings.Builder
+	b.WriteString("<p><strong>Sent to review while behind ")
+	b.WriteString(html.EscapeString(lag.Base))
+	b.WriteString("</strong> in a file this task owns, with --force.</p><ul>")
+	for _, c := range lag.OwnedCollisions() {
+		fmt.Fprintf(&b, "<li><code>%s</code> — landed by %s</li>", html.EscapeString(c.Path), html.EscapeString(landedBy(c)))
+	}
+	b.WriteString("</ul><p>The diff under review is not the diff that will merge.</p>")
+	if _, err := rt.client.AddTaskComment(ctx, id, b.String()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // composeDescription folds --description / --description-replace-* / --description-append

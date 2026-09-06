@@ -45,6 +45,10 @@ type TickResult struct {
 	Strays      int       `json:"strays"`
 	Collisions  int       `json:"collisions"`
 	HealthOK    bool      `json:"health_ok"`
+	RootsPushed bool      `json:"roots_published,omitempty"`
+	LagBehind   int       `json:"lag_behind"`
+	LagBlocking int       `json:"lag_blocking"`
+	LagCleared  int       `json:"lag_cleared"`
 	Notified    int       `json:"notified"`
 	Errors      []string  `json:"errors,omitempty"`
 	FetchedSpec bool      `json:"fetched_spec"`
@@ -71,6 +75,26 @@ func (e *Engine) Tick(ctx context.Context, base string) *TickResult {
 		res.Errors = append(res.Errors, "relay settings: "+err.Error())
 	} else {
 		e.ApplyRelaySettings(rs)
+	}
+
+	// Publish the repository's shape before anything reads or writes a scope
+	// path. The board has no checkout and cannot otherwise tell a
+	// repository-root-relative path from an app-relative one, so until this
+	// lands it accepts both — and two spellings of one file are two claims
+	// that cannot see each other. A failure is tolerated: the board keeps the
+	// shape it had, which is the previous truth rather than no truth.
+	if _, changed, err := e.PublishRepoRoots(ctx); err != nil {
+		// Once per distinct failure, not once per poll. Publishing is
+		// admin-gated on purpose, so a worker-token deployment fails here
+		// every single time — and an error that repeats every sixty seconds
+		// forever is one nobody reads, taking the next real error with it.
+		if !e.flags.Seen("roots-publish", err.Error()) {
+			res.Errors = append(res.Errors, "publish repository roots (the board keeps the shape it had; rerun `marshal setup` with an admin token): "+err.Error())
+		}
+	} else if changed {
+		e.flags.Clear("roots-publish")
+		res.RootsPushed = true
+		e.log(ledger.Entry{Action: "roots", Subject: "scope_repo_roots", Outcome: "ok", Reason: "the repository's top-level entries changed"})
 	}
 
 	e.mu.Lock()
@@ -100,8 +124,38 @@ func (e *Engine) Tick(ctx context.Context, base string) *TickResult {
 	}
 	res.Notified += e.announceReferences(ctx, snap, res)
 	res.Notified += e.announceBranches(ctx, snap, base, res)
+	e.recordLag(ctx, snap, base, res)
 	res.Notified += e.announceHealth(ctx, snap, res)
 	return res
+}
+
+// recordLag measures every claimed branch against the integration branch and
+// writes the answer to the board.
+//
+// It runs after the branch checks, which have already fetched, so the marginal
+// cost is a merge-base and a two-commit diff per branch whose tip or base has
+// moved — and nothing at all for the ones where neither has.
+func (e *Engine) recordLag(ctx context.Context, snap *board.Snapshot, base string, res *TickResult) {
+	rep, err := e.ComputeLag(ctx, snap, base)
+	if err != nil {
+		res.Errors = append(res.Errors, "lag: "+err.Error())
+		return
+	}
+	res.Errors = append(res.Errors, rep.Errors...)
+	res.LagBehind = len(rep.Branches)
+	for _, b := range rep.Branches {
+		if b.Lag.Blocking() {
+			res.LagBlocking++
+		}
+	}
+	written, cleared := e.PublishLag(ctx, snap, rep)
+	res.LagCleared = cleared
+	if written > 0 || cleared > 0 {
+		e.log(ledger.Entry{
+			Action: "lag", Subject: rep.Base, Outcome: "ok",
+			Metadata: map[string]any{"behind": res.LagBehind, "blocking": res.LagBlocking, "cleared": cleared, "cached": rep.Cached},
+		})
+	}
 }
 
 func (e *Engine) fetchSpec(ctx context.Context) error {
@@ -226,7 +280,7 @@ func (e *Engine) announceReferences(ctx context.Context, snap *board.Snapshot, r
 		if ids := brokenBy[t.ID]; len(ids) > 0 {
 			if !e.flags.Seen(fmt.Sprintf("broken:%d", t.ID), strings.Join(ids, ",")) {
 				n++
-				msg := fmt.Sprintf("Marshal: %s no longer resolve%s in the spec (%s).", strings.Join(ids, ", "), plural(len(ids), "s", ""), rep.Rev)
+				msg := fmt.Sprintf("Marshal: %s no longer resolve%s in the spec (%s).", strings.Join(ids, ", "), plural(len(ids)), rep.Rev)
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelBroken, "ef4444")
 				e.log(ledger.Entry{Action: "broken_ref", TaskID: t.ID, Subject: strings.Join(ids, ","), Outcome: "flagged"})
@@ -298,7 +352,7 @@ func (e *Engine) announceBranches(ctx context.Context, snap *board.Snapshot, bas
 						break
 					}
 				}
-				msg := fmt.Sprintf("Marshal: branch %s touches %d file%s outside this task's claim and %d leased by another task.", c.Branch, c.Result.Strays, plural(c.Result.Strays, "s", ""), c.Result.Collisions)
+				msg := fmt.Sprintf("Marshal: branch %s touches %d file%s outside this task's claim and %d leased by another task.", c.Branch, c.Result.Strays, plural(c.Result.Strays), c.Result.Collisions)
 				_ = e.Board.Comment(ctx, t.ID, "<p>"+html.EscapeString(msg)+"</p><ul><li>"+html.EscapeString(strings.Join(files, "</li><li>"))+"</li></ul>")
 				_ = e.Board.EnsureLabel(ctx, t, board.LabelStray, "ef4444")
 				e.log(ledger.Entry{Action: "stray", TaskID: t.ID, Subject: c.Branch, Outcome: "flagged", Metadata: map[string]any{"strays": c.Result.Strays, "collisions": c.Result.Collisions}})
@@ -314,7 +368,7 @@ func (e *Engine) announceBranches(ctx context.Context, snap *board.Snapshot, bas
 
 // announceHealth is M1.10: the invariants, announced when they change.
 func (e *Engine) announceHealth(ctx context.Context, snap *board.Snapshot, res *TickResult) int {
-	h := e.Health(snap)
+	h := e.Health(ctx, snap)
 	res.HealthOK = h.OK
 	sig := fmt.Sprintf("ok=%t collisions=%d cycles=%d tasks=%d", h.OK, h.Collisions, h.Cycles, h.Tasks)
 	if e.flags.Seen("health", sig) {
@@ -349,9 +403,11 @@ func (e *Engine) HandleDelivery(ctx context.Context, d notify.Delivery) {
 	e.Notify(ctx, d.EventName, e.Format.FromDelivery(d))
 }
 
-func plural(n int, many, one string) string {
+// plural is the "s" on a counted noun. Every caller wants the same two
+// strings, so it takes none.
+func plural(n int) string {
 	if n == 1 {
-		return one
+		return ""
 	}
-	return many
+	return "s"
 }

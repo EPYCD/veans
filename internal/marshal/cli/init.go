@@ -81,7 +81,7 @@ every key is documented in veans/README.md.`,
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing .marshal.yml")
-	cmd.Flags().StringVar(&appRoot, "app-root", "", "sub-directory the board's paths are relative to (e.g. captain-yard-web)")
+	cmd.Flags().StringVar(&appRoot, "app-root", "", "sub-directory the app lives in, if not the repository root (e.g. captain-yard-web); the gates' working directory, never a base for a scope path")
 	cmd.Flags().StringVar(&prd, "prd", "", "PRD file holding FR-/NFR- anchors")
 	cmd.Flags().StringVar(&spine, "spine", "", "architecture file holding AD- anchors")
 	cmd.Flags().StringVar(&epics, "epics", "", "epics file holding D- anchors")

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"code.vikunja.io/veans/internal/client"
@@ -101,6 +102,44 @@ type Snapshot struct {
 	DoneTasks []*client.Task
 	ByID      map[int64]*client.Task
 	Leases    []*client.TaskPathLease
+}
+
+// LabelLag marks a task whose branch is behind the integration branch in a
+// file it owns. It sits in the marshal: namespace with the other findings, and
+// like them it is attached and dropped by the watcher rather than by hand.
+const LabelLag = "marshal:lag"
+
+// ByRef finds a task by whatever a Refs: trailer wrote: "CY-43", "#43" or
+// "43". Done tasks count — the task that landed a change is almost always one
+// that just merged.
+//
+// The numeric part is a project index, not a task id, which is what the
+// trailer means and what by-index resolves; matching it against ids would
+// attribute changes to whatever task happened to have that id.
+func (s *Snapshot) ByRef(ref string) *client.Task {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	for _, t := range append(append([]*client.Task{}, s.Tasks...), s.DoneTasks...) {
+		if t.Identifier != "" && strings.EqualFold(t.Identifier, ref) {
+			return t
+		}
+	}
+	num := strings.TrimPrefix(ref, "#")
+	if i := strings.LastIndex(num, "-"); i >= 0 {
+		num = num[i+1:]
+	}
+	index, err := strconv.ParseInt(num, 10, 64)
+	if err != nil {
+		return nil
+	}
+	for _, t := range append(append([]*client.Task{}, s.Tasks...), s.DoneTasks...) {
+		if t.Index == index {
+			return t
+		}
+	}
+	return nil
 }
 
 // RelaySettings is how the board says this project should appear in Discord.

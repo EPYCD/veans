@@ -145,14 +145,20 @@ type Allocation struct {
 	Database string    `json:"database"`
 	Port     int       `json:"port"`
 	Since    time.Time `json:"since"`
+	// Base and BaseSHA are the integration branch this checkout was cut from
+	// and what it pointed at then. Recorded so a later staleness check knows
+	// what the branch actually started from rather than inferring it from a
+	// merge base that a rebase may already have moved.
+	Base    string `json:"base,omitempty"`
+	BaseSHA string `json:"base_sha,omitempty"`
 }
 
 // Conflict is a checkout whose registry entries are inconsistent with rule 1
 // or with the filesystem.
 type Conflict struct {
-	Checkout string
-	Workers  []string
-	Missing  bool
+	Checkout string   `json:"checkout"`
+	Workers  []string `json:"workers"`
+	Missing  bool     `json:"missing"`
 }
 
 // Store is the on-disk registry. Every mutating method takes the file lock,

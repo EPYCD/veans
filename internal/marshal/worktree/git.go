@@ -22,14 +22,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
 
 // Worktree is one entry of `git worktree list`.
 type Worktree struct {
-	Path, Branch, Head string
-	Bare, Detached     bool
+	Path     string `json:"path"`
+	Branch   string `json:"branch"`
+	Head     string `json:"head"`
+	Bare     bool   `json:"bare"`
+	Detached bool   `json:"detached"`
 }
 
 // Existing lists the worktrees attached to the repository at repoRoot.
@@ -80,6 +84,53 @@ func parseWorktrees(out string) []Worktree {
 	}
 	flush()
 	return list
+}
+
+// TopLevelEntries lists the tracked entries directly under dir, or under the
+// repository root when dir is empty. That is what a path relative to that
+// base can begin with.
+//
+// It reads the tree rather than the directory on purpose: an untracked or
+// ignored entry is not something a claim can be about, and letting
+// node_modules widen the set would defeat the check it feeds.
+func TopLevelEntries(ctx context.Context, repoRoot, dir string) ([]string, error) {
+	rev := "HEAD"
+	if dir = strings.Trim(dir, "/"); dir != "" {
+		rev = "HEAD:" + dir
+	}
+	out, err := git(ctx, repoRoot, "ls-tree", "--name-only", rev)
+	if err != nil {
+		return nil, fmt.Errorf("list the tracked entries of %q: %w", rev, err)
+	}
+	var entries []string
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			entries = append(entries, name)
+		}
+	}
+	sort.Strings(entries)
+	return entries, nil
+}
+
+// Fetch updates a remote. A failure is the caller's to judge: a repository
+// with no network is still a repository, and refusing to plan a worktree
+// because a fetch timed out helps nobody.
+func Fetch(ctx context.Context, repoRoot, remote string) error {
+	_, err := git(ctx, repoRoot, "fetch", remote)
+	return err
+}
+
+// ResolveSHA returns the commit a ref names, or "" when it names nothing.
+func ResolveSHA(ctx context.Context, repoRoot, ref string) (string, error) {
+	out, err := git(ctx, repoRoot, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // LastActivity returns the author date of the newest commit on branch, or

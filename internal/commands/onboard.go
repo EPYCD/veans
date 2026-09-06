@@ -211,7 +211,7 @@ safe to re-run on a half-configured repository.`,
 	cmd.Flags().StringVar(&f.botUsername, "bot-username", "", "override the bot-<repo> default")
 	cmd.Flags().Int64Var(&f.projectID, "project", 0, "use this project instead of picking or creating one")
 	cmd.Flags().Int64Var(&f.viewID, "view", 0, "use this Kanban view instead of picking one")
-	cmd.Flags().StringVar(&f.appRoot, "app-root", "", "sub-directory the board's paths are relative to (e.g. web); empty means the repository root")
+	cmd.Flags().StringVar(&f.appRoot, "app-root", "", "sub-directory the app lives in (e.g. web); empty means the repository root. The gates' working directory — scope paths stay relative to the repository root either way")
 	cmd.Flags().StringVar(&f.publicURL, "public-url", "", "how the board and CI reach Marshal; without it no webhook is registered")
 	cmd.Flags().StringVar(&f.discord, "discord-webhook", "", "Discord channel webhook URL")
 	cmd.Flags().StringVar(&f.codeowners, "codeowners", ".github/CODEOWNERS", "CODEOWNERS path")

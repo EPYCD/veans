@@ -16,7 +16,8 @@
 
 // Package invariants runs the continuous graph checks over a board export:
 // every open task carries a claim, overlapping claims are ordered, the
-// blocked graph is acyclic, and leases point at live tasks.
+// blocked graph is acyclic, leases point at live tasks, every stored path is
+// canonical, and every chokepoint is reachable from a claim.
 package invariants
 
 import (
@@ -55,25 +56,52 @@ const (
 	CodeLeaseWithoutTask = "lease_without_task"
 	CodeStaleLease       = "stale_lease"
 	CodeParentWithPaths  = "parent_with_paths"
+	// CodeNonCanonicalPath is a stored claim that is not in the canonical
+	// form: either spelled differently from how it would be stored today, or
+	// written against a base that is not the repository root. Either way it is
+	// a second identity waiting for the file it names.
+	CodeNonCanonicalPath = "non_canonical_path"
+	// CodeUnreachableChokepoint is a chokepoint that no claim could ever
+	// overlap because it is not in the namespace claims are stored in. Its
+	// queue is not quiet, it is unanswerable — and an empty queue and a
+	// healthy one render identically, which is how the first one shipped and
+	// stayed shipped.
+	CodeUnreachableChokepoint = "unreachable_chokepoint"
 )
 
+// Options carries what the path checks need and the graph checks do not: the
+// repository namespace, the repository's own top-level entries, and the
+// chokepoints read out of CODEOWNERS. The zero value disables both path
+// checks, which is what a repository that has published no roots gets.
+type Options struct {
+	// Repository is .veans.yml's repository, the `repo:` namespace.
+	Repository string
+	// Roots is what a repository-root-relative path looks like here.
+	Roots pathpattern.Roots
+	// Chokepoints are the CODEOWNERS-derived patterns, already canonical.
+	Chokepoints []string
+}
+
 // Finding is one violated or warned invariant.
+// The json tags here and on Report are load-bearing: both cross the wire to
+// the board's health panel, which reads snake_case. Without them Go emits its
+// own field names and the panel reads undefined off every field.
 type Finding struct {
-	Code    string // one of the Code* constants
-	Message string
-	TaskIDs []int64
-	Paths   []string
+	Code    string   `json:"code"` // one of the Code* constants
+	Message string   `json:"message"`
+	TaskIDs []int64  `json:"task_ids"`
+	Paths   []string `json:"paths"`
 }
 
 // Report is the outcome of one Check run.
 type Report struct {
-	Tasks          int // open, non-container tasks considered
-	Containers     int // tasks that have children
-	Collisions     int // unordered overlaps
-	Cycles         int
-	UnblockedRoots []int64 // open tasks with no open BlockedBy/Follows and no open subtasks (ids, ascending)
-	Findings       []Finding
-	OK             bool // no findings with code no_claim, unordered_overlap or blocked_cycle
+	Tasks          int       `json:"tasks"`      // open, non-container tasks considered
+	Containers     int       `json:"containers"` // tasks that have children
+	Collisions     int       `json:"collisions"` // unordered overlaps
+	Cycles         int       `json:"cycles"`
+	UnblockedRoots []int64   `json:"unblocked_roots"` // open tasks with no open BlockedBy/Follows and no open subtasks (ids, ascending)
+	Findings       []Finding `json:"findings"`
+	OK             bool      `json:"ok"` // no findings with code no_claim, unordered_overlap or blocked_cycle
 }
 
 type graph struct {
@@ -89,7 +117,7 @@ type graph struct {
 // Check evaluates the invariants over the given tasks and leases. Only open
 // tasks (Done == false) are considered; done tasks matter solely as the
 // targets of dangling leases.
-func Check(tasks []Task, leases []Lease) Report {
+func Check(tasks []Task, leases []Lease, opts Options) Report {
 	g := build(tasks)
 	var findings []Finding
 	findings = append(findings, claimFindings(g)...)
@@ -98,6 +126,8 @@ func Check(tasks []Task, leases []Lease) Report {
 	cycles := cycleFindings(g)
 	findings = append(findings, cycles...)
 	findings = append(findings, leaseFindings(g, leases)...)
+	findings = append(findings, canonicalFindings(g, leases, opts)...)
+	findings = append(findings, chokepointFindings(opts)...)
 
 	slices.SortFunc(findings, compareFindings)
 
@@ -111,12 +141,100 @@ func Check(tasks []Task, leases []Lease) Report {
 		OK:             true,
 	}
 	for _, f := range findings {
-		if f.Code == CodeNoClaim || f.Code == CodeUnorderedOverlap || f.Code == CodeBlockedCycle {
+		switch f.Code {
+		case CodeNoClaim, CodeUnorderedOverlap, CodeBlockedCycle,
+			CodeNonCanonicalPath, CodeUnreachableChokepoint:
 			r.OK = false
-			break
 		}
 	}
 	return r
+}
+
+// canonicalFindings is the path-canonicality invariant: no stored pattern —
+// declared scope or live lease — differs from its canonical form.
+//
+// It catches a regression in any producer, including one added later. Every
+// producer of a scope path is supposed to go through pathpattern.Canonical
+// now, but "supposed to" is not an assertion, and the cost of one that slips
+// through is a lease that silently protects nothing.
+func canonicalFindings(g *graph, leases []Lease, opts Options) []Finding {
+	var out []Finding
+	check := func(pattern string, taskID int64) {
+		canonical, err := pathpattern.Canonical(pattern, opts.Repository)
+		switch {
+		case err != nil:
+			out = append(out, Finding{
+				Code:    CodeNonCanonicalPath,
+				Message: fmt.Sprintf("%s claims %q, which is not a valid scope path: %v", g.label(taskID), pattern, err),
+				TaskIDs: []int64{taskID},
+				Paths:   []string{pattern},
+			})
+		case canonical != pattern:
+			out = append(out, Finding{
+				Code:    CodeNonCanonicalPath,
+				Message: fmt.Sprintf("%s claims %q, which is stored as %q — two spellings of one file are two claims", g.label(taskID), pattern, canonical),
+				TaskIDs: []int64{taskID},
+				Paths:   []string{pattern},
+			})
+		default:
+			if err := opts.Roots.Check(canonical); err != nil {
+				out = append(out, Finding{
+					Code:    CodeNonCanonicalPath,
+					Message: fmt.Sprintf("%s: %v", g.label(taskID), err),
+					TaskIDs: []int64{taskID},
+					Paths:   []string{pattern},
+				})
+			}
+		}
+	}
+	for _, id := range g.ids {
+		for _, p := range g.open[id].Paths {
+			check(p, id)
+		}
+	}
+	for _, l := range leases {
+		// A lease outliving its task is already its own finding; checking its
+		// pattern too would just say the same thing twice.
+		if g.open[l.TaskID] != nil {
+			check(l.Pattern, l.TaskID)
+		}
+	}
+	return out
+}
+
+// chokepointFindings is the chokepoint-reachability invariant: every
+// CODEOWNERS-derived pattern must live in the same namespace as a stored
+// claim, so that the queue for it is capable of having a row in it.
+//
+// This is the invariant whose absence let an always-empty queue ship and stay
+// shipped for the life of the feature. A queue with nothing in it looks
+// exactly like a queue with nothing to report, so no amount of looking at the
+// output would have found it; only asking whether the question was answerable
+// does.
+func chokepointFindings(opts Options) []Finding {
+	if !opts.Roots.Declared() {
+		return nil
+	}
+	var out []Finding
+	for _, cp := range opts.Chokepoints {
+		canonical, err := pathpattern.Canonical(cp, opts.Repository)
+		if err != nil {
+			out = append(out, Finding{
+				Code:    CodeUnreachableChokepoint,
+				Message: fmt.Sprintf("chokepoint %q is not a valid scope path: %v — nothing can ever queue on it", cp, err),
+				Paths:   []string{cp},
+			})
+			continue
+		}
+		if err := opts.Roots.Check(canonical); err != nil {
+			out = append(out, Finding{
+				Code:    CodeUnreachableChokepoint,
+				Message: fmt.Sprintf("chokepoint %q is not in the namespace claims are stored in, so its queue can never be non-empty: %v", cp, err),
+				Paths:   []string{cp},
+			})
+		}
+	}
+	return out
 }
 
 func build(tasks []Task) *graph {

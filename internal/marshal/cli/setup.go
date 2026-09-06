@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,6 +33,8 @@ import (
 	"code.vikunja.io/veans/internal/credentials"
 	"code.vikunja.io/veans/internal/marshal/board"
 	"code.vikunja.io/veans/internal/marshal/config"
+	"code.vikunja.io/veans/internal/marshal/pathpattern"
+	"code.vikunja.io/veans/internal/marshal/worktree"
 	"code.vikunja.io/veans/internal/output"
 )
 
@@ -47,6 +50,8 @@ type setupResult struct {
 	WebhookURL      string   `json:"webhook_url,omitempty"`
 	WebhookEvents   []string `json:"webhook_events,omitempty"`
 	WebhookExisting bool     `json:"webhook_existing,omitempty"`
+	ScopeRepoRoots  []string `json:"scope_repo_roots,omitempty"`
+	ScopeAppRoot    string   `json:"scope_app_root,omitempty"`
 	Next            []string `json:"next"`
 }
 
@@ -153,6 +158,15 @@ func runSetup(ctx context.Context, w interface{ Write([]byte) (int, error) }, mc
 		res.ClaimBucketSet = true
 	}
 
+	// Publish what a repository-root-relative path looks like here. Setup is
+	// the right place for it: it holds an admin token, and this is the oracle
+	// every scope path on the project will be judged against from now on.
+	// `marshal serve` keeps it current, but a repository whose top-level
+	// entries never change never needs it to.
+	if err := publishScopeRoots(ctx, admin, mcfg, vcfg, res); err != nil {
+		return err
+	}
+
 	if !skipWebhook && mcfg.Serve.PublicURL != "" {
 		if err := registerWebhook(ctx, admin, mcfg, vcfg, res); err != nil {
 			return err
@@ -168,6 +182,42 @@ func runSetup(ctx context.Context, w interface{ Write([]byte) (int, error) }, mc
 		res.Next = append(res.Next, "set serve.public_url and rerun setup to register the board webhook")
 	}
 	return emit(w, res)
+}
+
+// publishScopeRoots tells the board the shape of the repository, so it can
+// refuse a scope path written against the wrong base. Without it the board has
+// no way to tell "src/db/schema.ts" from "app/src/db/schema.ts" and accepts
+// both as separate claims on what is one file.
+//
+// A repository whose app_root is not actually in the tree publishes nothing:
+// enforcement that refuses valid paths would be worse than none.
+func publishScopeRoots(ctx context.Context, admin *client.Client, mcfg *config.Config, vcfg *veansconfig.Config, res *setupResult) error {
+	entries, err := worktree.TopLevelEntries(ctx, mcfg.Dir(), "")
+	if err != nil {
+		// A repository with no commits has no shape to publish yet; serve will
+		// pick it up on the first poll after one exists.
+		res.Next = append(res.Next, "could not read the repository's top-level entries ("+err.Error()+"); scope paths will not be checked against a base until `marshal serve` publishes them")
+		return nil //nolint:nilerr // setup must not fail on an empty repository
+	}
+	roots := pathpattern.Roots{Roots: entries, AppRoot: strings.Trim(strings.TrimSpace(mcfg.AppRoot), "/")}
+	if roots.AppRoot != "" {
+		if !slices.Contains(roots.Roots, roots.AppRoot) {
+			return output.New(output.CodeValidation, "app_root %q in %s is not a top-level entry of the repository — fix it before the board starts enforcing against it", roots.AppRoot, config.Filename)
+		}
+		if appEntries, err := worktree.TopLevelEntries(ctx, mcfg.Dir(), roots.AppRoot); err == nil {
+			roots.AppEntries = appEntries
+		}
+	}
+	if _, err := admin.PatchProject(ctx, vcfg.ProjectID, map[string]any{
+		"scope_repo_roots":  roots.String(),
+		"scope_app_root":    roots.AppRoot,
+		"scope_app_entries": roots.AppEntriesString(),
+	}); err != nil {
+		return output.Wrap(output.CodeUnknown, err, "publish the repository's scope roots: %v", err)
+	}
+	res.ScopeRepoRoots = roots.Roots
+	res.ScopeAppRoot = roots.AppRoot
+	return nil
 }
 
 func withWebhookGrants(perms map[string][]string, routes map[string]client.RouteGroup) map[string][]string {

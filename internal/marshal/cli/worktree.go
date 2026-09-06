@@ -27,12 +27,24 @@ import (
 
 func newWorktreeCmd() *cobra.Command {
 	var worker string
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "worktree <task>",
-		Short: "The exact worktree command for a story, with a database and port from the pool",
+		Short: "The exact worktree command for a story, cut from the integration branch",
 		Long: `Derives the branch and directory from the story id, allocates an unused
 database URI and port to the worker, records the checkout so a second worker
-resolving to the same path is refused, and prints the commands to run.`,
+resolving to the same path is refused, and prints the commands to run.
+
+The worktree is fetched and cut from the integration branch explicitly, so a
+worker starts current. Without a start point "git worktree add" branches from
+whatever the invoking checkout's HEAD happens to be — for a clone nobody has
+pulled in a week, a week-old base in the files you are about to edit.
+
+It is refused when another open task holds a lease on a path this one claims:
+that worker's base is guaranteed to move under exactly those files the moment
+the holder merges, so cutting now manufactures the conflict the lease exists
+to prevent. Wait for the holder, re-scope, or pass --force — which is recorded
+in the ledger.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			e, err := load()
@@ -46,7 +58,11 @@ resolving to the same path is refused, and prints the commands to run.`,
 			if worker == "" {
 				worker = e.Board.Identity
 			}
-			plan, err := e.PlanWorktree(t, worker)
+			snap, err := e.Board.Snapshot(cmd.Context())
+			if err != nil {
+				return err
+			}
+			plan, err := e.PlanWorktree(cmd.Context(), snap, t, worker, force)
 			if err != nil {
 				return err
 			}
@@ -54,6 +70,7 @@ resolving to the same path is refused, and prints the commands to run.`,
 		},
 	}
 	cmd.Flags().StringVar(&worker, "worker", "", "who the checkout belongs to (default: the token's identity)")
+	cmd.Flags().BoolVar(&force, "force", false, "cut the worktree even though an open task holds a lease on a path this one claims (recorded in the ledger)")
 	return cmd
 }
 

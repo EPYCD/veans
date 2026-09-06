@@ -33,6 +33,8 @@ const (
 	DefaultBranch = "{{.Story}}-{{.Slug}}"
 	// DefaultDir is the worktree directory template used when Naming.Dir is empty.
 	DefaultDir = "../{{.Repo}}-{{.Story}}"
+	// DefaultIntegrationBranch is what work is cut from and merged back into.
+	DefaultIntegrationBranch = "origin/main"
 
 	maxSlugLen = 32
 )
@@ -48,11 +50,42 @@ type Naming struct {
 
 // Plan is what a worker must run to start on a story.
 type Plan struct {
-	Story, Slug, Branch, Dir string
+	Story  string `json:"story"`
+	Slug   string `json:"slug"`
+	Branch string `json:"branch"`
+	Dir    string `json:"dir"`
+	// Base is the integration branch the worktree is cut from, e.g.
+	// "origin/main". A worktree with no start point branches from whatever the
+	// invoking checkout's HEAD happens to be, which for a clone nobody has
+	// pulled in a week is a week-old base — so the command that exists to set
+	// a worker up correctly was seeding the staleness it is meant to prevent.
+	Base string `json:"base"`
+	// BaseSHA is what Base resolved to when the plan was made, recorded so a
+	// later staleness check knows what this branch actually started from
+	// rather than guessing. Empty when the base could not be resolved.
+	BaseSHA string `json:"base_sha"`
 	// Commands are the shell lines to run, in order, with all values substituted.
-	Commands []string
+	Commands []string `json:"commands"`
 	// EnvLines are the "KEY=value" lines the plan appends to .env.local.
-	EnvLines []string
+	EnvLines []string `json:"env_lines"`
+}
+
+// BuildOptions is what a plan is derived from. It is a struct rather than a
+// parameter list because the list had already reached eight and the next
+// reader should not have to count commas to find which string is the title.
+type BuildOptions struct {
+	Naming   Naming
+	RepoRoot string
+	// Story, Title and Identifier name the work; Story wins, then Title.
+	Story, Title, Identifier string
+	TaskID                   int64
+	// Database and Port come from the pool; zero values emit no .env.local line.
+	Database string
+	Port     int
+	// Base is the integration branch to cut from. Empty means the plan does
+	// not fetch and does not pass a start point — the old behaviour, kept only
+	// for callers that genuinely have no remote.
+	Base string
 }
 
 type templateData struct {
@@ -139,34 +172,41 @@ func splitWords(s string) []string {
 	return words
 }
 
-// Build renders the plan for a story. repoRoot is the current checkout: it
-// supplies .Repo and anchors Plan.Dir as an absolute path, while Commands
-// keep the relative form the template produced. database and port may be
-// zero, in which case no .env.local line is emitted for them.
-func Build(n Naming, repoRoot, story, title, identifier string, taskID int64, database string, port int) (Plan, error) {
-	id := StoryID(story)
+// Build renders the plan for a story. o.RepoRoot is the current checkout: it
+// supplies .Repo and anchors Plan.Dir as an absolute path, while Commands keep
+// the relative form the template produced. o.Database and o.Port may be zero,
+// in which case no .env.local line is emitted for them.
+//
+// When o.Base is set the plan fetches and cuts from it explicitly. That is the
+// whole point: `git worktree add <dir> -b <branch>` with no commit-ish
+// branches from the CURRENT HEAD of the invoking checkout, so a worker running
+// it in a clone they have not pulled in a week starts a week behind, in the
+// files they are about to edit. A worker who starts current mostly never
+// becomes a staleness case at all.
+func Build(o BuildOptions) (Plan, error) {
+	id := StoryID(o.Story)
 	if id == "" {
-		id = StoryID(title)
+		id = StoryID(o.Title)
 	}
 	if id == "" {
-		return Plan{}, fmt.Errorf("worktree: no story id in story %q or title %q", story, title)
+		return Plan{}, fmt.Errorf("worktree: no story id in story %q or title %q", o.Story, o.Title)
 	}
-	root, err := filepath.Abs(repoRoot)
+	root, err := filepath.Abs(o.RepoRoot)
 	if err != nil {
-		return Plan{}, fmt.Errorf("resolve repo root %q: %w", repoRoot, err)
+		return Plan{}, fmt.Errorf("resolve repo root %q: %w", o.RepoRoot, err)
 	}
 	data := templateData{
 		Story:      strings.ToLower(id),
-		Slug:       Slug(stripStory(title, id)),
+		Slug:       Slug(stripStory(o.Title, id)),
 		Repo:       filepath.Base(root),
-		Identifier: identifier,
-		TaskID:     taskID,
+		Identifier: o.Identifier,
+		TaskID:     o.TaskID,
 	}
-	branch, err := render("branch", n.Branch, DefaultBranch, data)
+	branch, err := render("branch", o.Naming.Branch, DefaultBranch, data)
 	if err != nil {
 		return Plan{}, err
 	}
-	dir, err := render("dir", n.Dir, DefaultDir, data)
+	dir, err := render("dir", o.Naming.Dir, DefaultDir, data)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -175,16 +215,21 @@ func Build(n Naming, repoRoot, story, title, identifier string, taskID int64, da
 		absDir = filepath.Join(root, dir)
 	}
 
-	p := Plan{Story: id, Slug: data.Slug, Branch: branch, Dir: absDir}
-	p.Commands = []string{
-		fmt.Sprintf("git worktree add %s -b %s", shWord(dir), shWord(branch)),
-		"cd " + shWord(dir),
+	p := Plan{Story: id, Slug: data.Slug, Branch: branch, Dir: absDir, Base: o.Base}
+	add := fmt.Sprintf("git worktree add %s -b %s", shWord(dir), shWord(branch))
+	if o.Base != "" {
+		// Fetch first, or the start point is whatever this checkout last saw
+		// of the integration branch — which is the same staleness by a
+		// different route.
+		p.Commands = append(p.Commands, "git fetch "+shWord(RemoteOf(o.Base)))
+		add += " " + shWord(o.Base)
 	}
-	if database != "" {
-		p.EnvLines = append(p.EnvLines, "MONGODB_URI="+database)
+	p.Commands = append(p.Commands, add, "cd "+shWord(dir))
+	if o.Database != "" {
+		p.EnvLines = append(p.EnvLines, "MONGODB_URI="+o.Database)
 	}
-	if port != 0 {
-		p.EnvLines = append(p.EnvLines, fmt.Sprintf("PORT=%d", port))
+	if o.Port != 0 {
+		p.EnvLines = append(p.EnvLines, fmt.Sprintf("PORT=%d", o.Port))
 	}
 	if len(p.EnvLines) > 0 {
 		quoted := make([]string, len(p.EnvLines))
@@ -194,6 +239,15 @@ func Build(n Naming, repoRoot, story, title, identifier string, taskID int64, da
 		p.Commands = append(p.Commands, `printf '%s\n' `+strings.Join(quoted, " ")+" >> .env.local")
 	}
 	return p, nil
+}
+
+// RemoteOf names the remote a base ref lives on: "origin/main" -> "origin".
+// A bare branch name has no remote, so it fetches the default one.
+func RemoteOf(base string) string {
+	if i := strings.Index(base, "/"); i > 0 {
+		return base[:i]
+	}
+	return "origin"
 }
 
 // stripStory removes a leading story id (and the separator after it) from a

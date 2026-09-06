@@ -22,7 +22,18 @@ this file is veans-specific.
   `internal/config` (.veans.yml) and `internal/credentials`. `mage build`
   builds both binaries; `deploy/Dockerfile.marshal` builds the image.
 - `internal/marshal/pathpattern` is a port of the server's
-  `pkg/models/path_pattern.go`; change them together.
+  `pkg/models/path_pattern.go`; change them together. There is a THIRD copy of
+  the canonical-path rule, in shell, at
+  `.github/actions/workman-merge-hook/common.sh` — the PR hook's check mode has
+  no binary to shell out to. All three are held to one table:
+  `canonical-path_test.sh`, `TestCanonical` and `TestCanonicalPath`.
+- A scope path is repository-root-relative. `app_root` says where the app
+  lives (the gates' working directory, the base for `docs_api_paths`) and is
+  never a base for a claim; rebasing onto it gave one file two identities that
+  no lease could see across. The board cannot check this alone — it has no
+  checkout — so `marshal setup` publishes the repository's top-level entries
+  onto the project and `marshal serve` keeps them current. Until a project has
+  published them, the board enforces nothing.
 - Identity: `board.Open` picks `MARSHAL_TOKEN`, then the credential-store
   account `bot-marshal-<repo>`, then the repo's veans bot. `marshal setup`
   is the only command that needs a human's token, passed via `--token`

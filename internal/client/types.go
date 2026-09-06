@@ -59,6 +59,13 @@ type Project struct {
 	// passing receipt from it.
 	ReceiptBotID int64 `json:"receipt_bot_id,omitempty"`
 
+	// The repository's shape, as the board knows it. Marshal publishes both
+	// from its checkout; the board has none and cannot otherwise tell a
+	// repository-root-relative scope path from an app-relative one.
+	ScopeRepoRoots  string `json:"scope_repo_roots,omitempty"`
+	ScopeAppRoot    string `json:"scope_app_root,omitempty"`
+	ScopeAppEntries string `json:"scope_app_entries,omitempty"`
+
 	// How the relay presents this project. Set from the board's project
 	// settings; the webhook URL is deliberately not here, it stays a
 	// credential in the relay's own environment.
@@ -140,6 +147,90 @@ type Task struct {
 	// GetTask always requests; list reads leave them nil.
 	Scope  *TaskScope       `json:"scope,omitempty"`
 	Leases []*TaskPathLease `json:"leases,omitempty"`
+	// Lag arrives with expand=lag; nil when the branch is current or has
+	// never been measured.
+	Lag *TaskLag `json:"lag,omitempty"`
+}
+
+// Lag severities, worst first. Mirrors the board's models.TaskLag; keep them
+// in lockstep.
+const (
+	// LagSeverityOwned: the integration branch moved inside paths_owned. A
+	// textual conflict is certain, not likely. Only this gates anything.
+	LagSeverityOwned = "owned"
+	// LagSeverityAffected: it moved inside paths_affected. No merge conflict,
+	// but the code the task depends on changed and its gates will not see
+	// that until it rebases.
+	LagSeverityAffected = "affected"
+	// LagSeverityElsewhere: it moved outside the task's scope. Counted, never
+	// gating.
+	LagSeverityElsewhere = "elsewhere"
+)
+
+var lagSeverityRank = map[string]int{
+	LagSeverityElsewhere: 1,
+	LagSeverityAffected:  2,
+	LagSeverityOwned:     3,
+}
+
+// TaskLag is how far a claimed task's branch has fallen behind the integration
+// branch, in the files the task holds. Marshal computes it; the board stores
+// it; everything else reads it.
+type TaskLag struct {
+	TaskID        int64           `json:"task_id,omitempty"`
+	Branch        string          `json:"branch"`
+	Base          string          `json:"base"`
+	BaseSHA       string          `json:"base_sha,omitempty"`
+	MergeBaseSHA  string          `json:"merge_base_sha,omitempty"`
+	CommitsBehind int             `json:"commits_behind"`
+	Severity      string          `json:"severity"`
+	Collisions    []*LagCollision `json:"collisions"`
+	ComputedAt    time.Time       `json:"computed_at"`
+}
+
+// LagCollision is one path the integration branch moved under a claimed task.
+type LagCollision struct {
+	Path               string    `json:"path"`
+	Severity           string    `json:"severity"`
+	LandedByTaskID     int64     `json:"landed_by_task_id,omitempty"`
+	LandedByIdentifier string    `json:"landed_by_identifier,omitempty"`
+	LandedInSHA        string    `json:"landed_in_sha,omitempty"`
+	LandedAt           time.Time `json:"landed_at,omitempty"`
+}
+
+// MaxLagSeverity returns the worst severity across collisions, or "".
+func MaxLagSeverity(collisions []*LagCollision) string {
+	worst := ""
+	for _, c := range collisions {
+		if c != nil && lagSeverityRank[c.Severity] > lagSeverityRank[worst] {
+			worst = c.Severity
+		}
+	}
+	return worst
+}
+
+// Blocking reports whether this lag should stop the task moving on. Only
+// `owned` does: `affected` collisions are common and usually harmless, and
+// gating on them would train everyone to override the gate that matters.
+func (l *TaskLag) Blocking() bool {
+	return l != nil && l.Severity == LagSeverityOwned
+}
+
+// OwnedCollisions and AffectedCollisions split the list for reporting.
+func (l *TaskLag) OwnedCollisions() []*LagCollision    { return l.bySeverity(LagSeverityOwned) }
+func (l *TaskLag) AffectedCollisions() []*LagCollision { return l.bySeverity(LagSeverityAffected) }
+
+func (l *TaskLag) bySeverity(sev string) []*LagCollision {
+	if l == nil {
+		return nil
+	}
+	var out []*LagCollision
+	for _, c := range l.Collisions {
+		if c != nil && c.Severity == sev {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // TaskPatch is the JSON Merge Patch body for UpdateTask (PATCH /tasks/{id}).

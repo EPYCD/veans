@@ -78,6 +78,51 @@ require_server() {
 	[[ "$status" =~ ^2 ]] || fail "cannot reach $SERVER as project $PROJECT_ID (HTTP $status) — check the server URL and WORKMAN_TOKEN"
 }
 
+# ---------------------------------------------------------------------------
+# Scope paths.
+#
+# canonical_path prints one scope path in the canonical form the board stores
+# and compares: relative to the REPOSITORY root, forward slashes, no leading
+# "/", no "./", no repeated slashes, no trailing slash. It is the shell copy of
+# CanonicalPath in pkg/models/path_pattern.go and Canonical in
+# veans/internal/marshal/pathpattern — change the three together, and see
+# canonical-path_test.sh for the cases all three must agree on.
+#
+# It deliberately does NOT rebase onto an app sub-directory. git already prints
+# repository-root-relative paths, which is what makes the repository root the
+# canonical base; rebasing here would hand the board a path it cannot match
+# against the claim the pre-commit hook made from the same git output.
+#
+# A "repo:" namespace, when the project uses one, is applied by the server from
+# the `repository` field of the request, so this handles the path part only.
+# ---------------------------------------------------------------------------
+canonical_path() {
+	local p="$1"
+	p="${p//\\//}"                       # backslashes are separators too
+	while [[ "$p" == ./* ]]; do p="${p#./}"; done
+	p="${p#/}"
+	while [[ "$p" == *//* ]]; do p="${p//\/\///}"; done
+	p="${p%/}"
+	printf '%s' "$p"
+}
+
+# canonical_paths reads paths on stdin, one per line, and prints each in
+# canonical form, dropping blanks. Anything that could escape the repository is
+# a hard failure: git cannot produce one, so its appearance means the caller is
+# not feeding this what it thinks it is.
+canonical_paths() {
+	local p
+	while IFS= read -r p; do
+		p="$(canonical_path "$p")"
+		[[ -n "$p" && "$p" != "." ]] || continue
+		case "/$p/" in
+			*/../*) fail "refusing to check a path that escapes the repository: '$p'" ;;
+			*/./*) fail "refusing to check a path with a '.' segment: '$p'" ;;
+		esac
+		printf '%s\n' "$p"
+	done
+}
+
 html_escape() {
 	sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' <<<"$1"
 }

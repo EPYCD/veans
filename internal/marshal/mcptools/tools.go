@@ -396,6 +396,10 @@ func (t *tools) checkScope(ctx context.Context, args json.RawMessage) (mcp.Resul
 func (t *tools) worktreePlan(ctx context.Context, args json.RawMessage) (mcp.Result, error) {
 	var in struct {
 		Task string `json:"task"`
+		// Force cuts the worktree anyway when another open task holds a lease
+		// on a path this one claims. An agent has to ask for it in as many
+		// words, and the ledger records that it did.
+		Force bool `json:"force"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
 		return refusal(err)
@@ -404,7 +408,11 @@ func (t *tools) worktreePlan(ctx context.Context, args json.RawMessage) (mcp.Res
 	if err != nil {
 		return refusal(err)
 	}
-	plan, err := t.e.PlanWorktree(task, t.e.Board.Identity)
+	snap, err := t.e.Board.Snapshot(ctx)
+	if err != nil {
+		return refusal(err)
+	}
+	plan, err := t.e.PlanWorktree(ctx, snap, task, t.e.Board.Identity, in.Force)
 	if err != nil {
 		return refusal(err)
 	}
@@ -416,5 +424,5 @@ func (t *tools) health(ctx context.Context, _ json.RawMessage) (mcp.Result, erro
 	if err != nil {
 		return refusal(err)
 	}
-	return result(t.e.Health(snap))
+	return result(t.e.Health(ctx, snap))
 }

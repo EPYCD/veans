@@ -90,6 +90,9 @@ func (c *Client) GetTask(ctx context.Context, id int64) (*Task, error) {
 	q.Add("expand", "buckets")
 	q.Add("expand", "scope")
 	q.Add("expand", "leases")
+	// Lag rides along with every single-task read: it is small, and a worker
+	// asking about a task is exactly who needs to know its branch is behind.
+	q.Add("expand", "lag")
 	if err := c.Do(ctx, "GET", fmt.Sprintf("/tasks/%d", id), q, nil, &out); err != nil {
 		return nil, err
 	}
