@@ -171,7 +171,7 @@ func (ix *Index) Resolve(refs []Ref) []Resolution {
 	for _, ref := range refs {
 		res := Resolution{Ref: ref}
 		if ix != nil {
-			if a, ok := ix.Anchors[ref.ID]; ok {
+			if a, ok := ix.lookup(ref.ID); ok {
 				res.Found = true
 				res.Anchor = a
 				res.Provenance = ix.provenance(a.File)
@@ -180,6 +180,39 @@ func (ix *Index) Resolve(refs []Ref) []Resolution {
 		out = append(out, res)
 	}
 	return out
+}
+
+// lookup finds an id's anchor, falling back to the singular when the id is an
+// English plural of a real anchor. idBody ends in an optional lowercase letter
+// so a suffixed id like "FR-161a" extracts whole, which also swallows the "s"
+// of a plural written in prose: "FR-30s already does this" extracts as the id
+// "FR-30s", which no spec defines, and the task is then reported as a broken
+// reference over a grammatical plural. The fallback is deliberately narrow --
+// only an "s" directly after a digit, and only when the index holds no anchor
+// under the id as written. A spec that really defines FR-30s still wins, and a
+// wrong suffix like "FR-161b" stays broken, which is the report's job.
+func (ix *Index) lookup(id string) (Anchor, bool) {
+	if a, ok := ix.Anchors[id]; ok {
+		return a, true
+	}
+	if base, ok := singular(id); ok {
+		if a, ok := ix.Anchors[base]; ok {
+			return a, true
+		}
+	}
+	return Anchor{}, false
+}
+
+// singular strips a plural "s" that follows a digit, reporting whether the id
+// had that shape at all.
+func singular(id string) (string, bool) {
+	if len(id) < 2 || id[len(id)-1] != 's' {
+		return "", false
+	}
+	if c := id[len(id)-2]; c < '0' || c > '9' {
+		return "", false
+	}
+	return id[:len(id)-1], true
 }
 
 func (ix *Index) provenance(file string) string {
