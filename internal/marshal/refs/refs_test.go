@@ -82,6 +82,51 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestResolvePluralInProse(t *testing.T) {
+	base := Anchor{ID: "FR-30", File: "prd.md", Line: 7, Title: "t", Text: "x", Hash: "h"}
+	suffixed := Anchor{ID: "FR-161a", File: "prd.md", Line: 9, Title: "t", Text: "x", Hash: "h"}
+	literal := Anchor{ID: "FR-40s", File: "prd.md", Line: 11, Title: "t", Text: "x", Hash: "h"}
+	ix := &Index{Rev: "abc123", Anchors: map[string]Anchor{
+		"FR-30": base, "FR-161a": suffixed, "FR-40s": literal, "FR-40": {ID: "FR-40", File: "other.md"},
+	}}
+
+	tests := []struct {
+		name       string
+		id         string
+		wantFound  bool
+		wantAnchor Anchor
+	}{
+		{name: "plural of a real anchor resolves to it", id: "FR-30s", wantFound: true, wantAnchor: base},
+		{name: "exact id still resolves", id: "FR-30", wantFound: true, wantAnchor: base},
+		{name: "a defined plural wins over the fallback", id: "FR-40s", wantFound: true, wantAnchor: literal},
+		{name: "real letter suffix is untouched", id: "FR-161a", wantFound: true, wantAnchor: suffixed},
+		{name: "a wrong letter suffix stays broken", id: "FR-161b"},
+		{name: "plural of an unknown id stays broken", id: "FR-999s"},
+		{name: "s after a letter is not a plural", id: "FR-161as"},
+		{name: "bare prefix is not a plural", id: "FRs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ix.Resolve([]Ref{{ID: tc.id, Prefix: "FR-"}})
+			if len(got) != 1 {
+				t.Fatalf("got %d resolutions, want 1", len(got))
+			}
+			if got[0].Found != tc.wantFound {
+				t.Fatalf("Resolve(%q).Found = %t, want %t", tc.id, got[0].Found, tc.wantFound)
+			}
+			if got[0].Anchor != tc.wantAnchor {
+				t.Errorf("Resolve(%q).Anchor = %+v, want %+v", tc.id, got[0].Anchor, tc.wantAnchor)
+			}
+			if got[0].Ref.ID != tc.id {
+				t.Errorf("Resolve(%q) rewrote the ref to %q; the id as written is what the reader sees", tc.id, got[0].Ref.ID)
+			}
+			if tc.wantFound && got[0].Provenance == "" {
+				t.Errorf("Resolve(%q) found an anchor with no provenance", tc.id)
+			}
+		})
+	}
+}
+
 func TestDiff(t *testing.T) {
 	prev := &Index{Anchors: map[string]Anchor{
 		"FR-1": {Hash: "same"}, "FR-2": {Hash: "before"}, "FR-3": {Hash: "gone"}, "AD-1": {Hash: "same"},
