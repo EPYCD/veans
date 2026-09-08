@@ -17,7 +17,10 @@
 package board
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"code.vikunja.io/veans/internal/client"
 	"code.vikunja.io/veans/internal/marshal/invariants"
@@ -89,5 +92,82 @@ func TestInvariantTasksChildlessTaskStillNeedsAClaim(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("childless claimless task was not flagged: %+v", rep.Findings)
+	}
+}
+
+// writeConfig lays a minimal .veans.yml in a temp dir and returns the dir, so
+// Open has something to Find.
+func writeConfig(t *testing.T, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := "server: https://board.example.com\nproject_id: 3\nbot:\n    username: bot-thing\n    user_id: 3\n" + extra
+	if err := os.WriteFile(filepath.Join(dir, ".veans.yml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// MARSHAL_BOARD_URL moves the API calls onto the internal address and moves
+// NOTHING else. The public server in .veans.yml is what a person reads: a task
+// link that pointed at http://workman:3456 would be unopenable from any
+// browser, and that is precisely the shape of silent regression this override
+// exists to avoid, not to cause.
+func TestOpenBoardURLOverrideMovesOnlyTheAPIAddress(t *testing.T) {
+	t.Setenv("MARSHAL_TOKEN", "tok")
+	t.Setenv("MARSHAL_BOARD_URL", "http://workman:3456/")
+
+	b, err := Open(writeConfig(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if b.APIURL != "http://workman:3456" {
+		t.Errorf("APIURL = %q, want the override with its trailing slash trimmed", b.APIURL)
+	}
+	if b.Client.BaseURL != "http://workman:3456" {
+		t.Errorf("client BaseURL = %q, want the internal address", b.Client.BaseURL)
+	}
+	if b.Cfg.Server != "https://board.example.com" {
+		t.Errorf("Cfg.Server = %q, want the config left alone", b.Cfg.Server)
+	}
+	if got, want := b.TaskURL(7), "https://board.example.com/tasks/7"; got != want {
+		t.Errorf("TaskURL = %q, want %q — a person has to be able to open this", got, want)
+	}
+}
+
+// Unset is the ordinary case: everyone who is not a container beside the board
+// keeps talking to the address in the config.
+func TestOpenWithoutOverrideUsesTheConfiguredServer(t *testing.T) {
+	t.Setenv("MARSHAL_TOKEN", "tok")
+	t.Setenv("MARSHAL_BOARD_URL", "")
+
+	b, err := Open(writeConfig(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if b.APIURL != "https://board.example.com" {
+		t.Errorf("APIURL = %q, want Cfg.Server", b.APIURL)
+	}
+	if b.Client.BaseURL != "https://board.example.com" {
+		t.Errorf("client BaseURL = %q, want Cfg.Server", b.Client.BaseURL)
+	}
+}
+
+// http_timeout used to be honoured only on the stored-credential path: the
+// MARSHAL_TOKEN branch returned before the line that applied it. The
+// deployment is the side that sets MARSHAL_TOKEN, so the one configuration
+// anybody would set this for was the one ignoring it.
+func TestOpenAppliesHTTPTimeoutOnTheTokenPath(t *testing.T) {
+	t.Setenv("MARSHAL_TOKEN", "tok")
+	t.Setenv("MARSHAL_BOARD_URL", "")
+
+	b, err := Open(writeConfig(t, "http_timeout: 90s\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := b.Client.HTTPClient.Timeout; got != 90*time.Second {
+		t.Errorf("HTTP timeout = %s, want 90s from .veans.yml", got)
 	}
 }

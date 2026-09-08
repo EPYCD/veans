@@ -39,6 +39,13 @@ this file is veans-specific.
   is the only command that needs a human's token, passed via `--token`
   and never stored. The CI token it prints goes to GitHub as
   `WORKMAN_TOKEN`; nothing else may post receipts.
+- Address: `.veans.yml`'s `server` is the board's PUBLIC url and stays that —
+  it is committed, and it is the key the credential store files tokens under.
+  `MARSHAL_BOARD_URL` overrides where Marshal *calls* the board, for the usual
+  case of a container sitting on the same network as it, and overrides nothing
+  else. `Board.APIURL` is that address; `Board.Cfg.Server` is the one a person
+  reads. Task links, the Discord health field and the CORS origin allowlist all
+  want `Cfg.Server` and would each be a silent regression on the override.
 - The e2e for the whole layer is `e2e/marshal_test.go`; it builds the
   marshal binary itself and runs under the same `VEANS_E2E_*` harness.
 

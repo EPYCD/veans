@@ -46,8 +46,38 @@ const (
 type Board struct {
 	Cfg    *config.Config
 	Client *client.Client
+	// APIURL is where Marshal actually calls the board. It is Cfg.Server
+	// unless MARSHAL_BOARD_URL overrides it; see apiURL. Anything that puts
+	// an address in front of a person — a task link, a Discord field, a
+	// browser origin — wants Cfg.Server, not this.
+	APIURL string
 	// Identity is the username the token belongs to, for the ledger.
 	Identity string
+}
+
+// apiURL is the address Marshal calls the board on.
+//
+// .veans.yml's `server` is the board's PUBLIC url, and it has to stay that:
+// it is committed, every human and every checkout outside this deployment
+// reads the same file, and it is the key the credential store files tokens
+// under. But Marshal is usually a container sitting on the same network as
+// the board it coordinates, and going out to the public name means leaving
+// the machine and coming back through whatever fronts it.
+//
+// On 08-09-2026 that cost six minutes of blindness: the Cloudflare tunnel
+// dropped all four edge connections and Marshal — one docker network away
+// from the board the whole time — logged `lookup workman.kaoxhq.tech: no
+// such host` once a minute and lost a lag write. CI had the identical bug
+// and was fixed for it days earlier (CapYard #181); this is the same fix on
+// the other side of the same board.
+//
+// So: an env override, because the public url in the config is right for
+// everyone who is not this container.
+func apiURL(cfg *config.Config) string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("MARSHAL_BOARD_URL")), "/"); v != "" {
+		return v
+	}
+	return cfg.Server
 }
 
 // Open loads .veans.yml from dir upward and picks a token: MARSHAL_TOKEN,
@@ -66,29 +96,45 @@ func Open(dir string) (*Board, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &Board{Cfg: cfg}
+	b := &Board{Cfg: cfg, APIURL: apiURL(cfg)}
 	if tok := os.Getenv("MARSHAL_TOKEN"); tok != "" {
-		b.Client = client.New(cfg.Server, tok)
-		b.Identity = "marshal"
+		b.connect(tok, "marshal")
 		return b, nil
 	}
 	store := credentials.Default()
 	repo := strings.TrimPrefix(cfg.Bot.Username, "bot-")
 	for _, account := range []string{MarshalBotPrefix + repo, cfg.Bot.Username} {
+		// cfg.Server, not b.APIURL: the store keys a token by the board it
+		// belongs to, and `marshal setup` files it under the public name from
+		// outside the container. Keying the read by an override would look up
+		// an address nothing ever wrote.
 		tok, err := store.Get(cfg.Server, account)
 		if err == nil && tok != "" {
-			b.Client = client.New(cfg.Server, tok)
-			b.Identity = account
-			if cfg.HTTPTimeout > 0 {
-				b.Client.HTTPClient.Timeout = cfg.HTTPTimeout
-			}
+			b.connect(tok, account)
 			return b, nil
 		}
 	}
 	return nil, output.New(output.CodeAuth, "no token for Marshal on %s — set MARSHAL_TOKEN or run `marshal setup`", cfg.Server)
 }
 
-// TaskURL is the board page of a task.
+// connect builds the client both auth paths share.
+//
+// It exists because they had drifted: the MARSHAL_TOKEN branch returned
+// before it reached the http_timeout line, so .veans.yml's `http_timeout`
+// was honoured for a developer running off a stored credential and silently
+// ignored for the deployment, which is the one that sets MARSHAL_TOKEN and
+// the one whose timeouts anybody notices.
+func (b *Board) connect(token, identity string) {
+	b.Client = client.New(b.APIURL, token)
+	b.Identity = identity
+	if b.Cfg.HTTPTimeout > 0 {
+		b.Client.HTTPClient.Timeout = b.Cfg.HTTPTimeout
+	}
+}
+
+// TaskURL is the board page of a task. Cfg.Server deliberately: this address
+// is read by a person, and MARSHAL_BOARD_URL is reachable only from inside
+// Marshal's own network.
 func (b *Board) TaskURL(taskID int64) string {
 	return strings.TrimRight(b.Cfg.Server, "/") + fmt.Sprintf("/tasks/%d", taskID)
 }
