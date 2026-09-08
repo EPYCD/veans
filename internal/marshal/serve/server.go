@@ -206,7 +206,10 @@ func (s *Server) lookup(ctx context.Context, tok string) (*client.User, error) {
 		return e.user, nil
 	}
 	s.authMu.Unlock()
-	c := client.New(s.Engine.Board.Cfg.Server, tok)
+	// APIURL, not Cfg.Server: this is a call TO the board and takes the same
+	// route every other one does. The allowlist in cors() below is the opposite
+	// case — a browser Origin, which is the public name and only ever that.
+	c := client.New(s.Engine.Board.APIURL, tok)
 	u, err := c.CurrentUser(ctx)
 	if err != nil {
 		return nil, err
