@@ -39,6 +39,7 @@ type Task struct {
 	BlockedBy  []int64  // open or done — the checker filters
 	Follows    []int64
 	ParentID   int64 // 0 for roots; a parent is a container and is exempt from "carries a claim"
+	Ops        bool  // operations work: it edits no files, so it is exempt too
 }
 
 // Lease is a live path lease as reported by the board.
@@ -304,7 +305,13 @@ func claimFindings(g *graph) []Finding {
 				TaskIDs: []int64{id},
 				Paths:   slices.Clone(t.Paths),
 			})
-		case !g.containers[id] && len(t.Paths) == 0:
+		// An operations task edits nothing -- "the CI account has no minutes",
+		// "get the payment credentials", "diagnose one real network". Demanding
+		// a claim from it means inventing one, and an invented claim is worse
+		// than none: it collides with whoever really owns those files. The
+		// board says which tasks these are with veans:ops, the same label that
+		// exempts them from the receipt rule on the board side.
+		case !g.containers[id] && len(t.Paths) == 0 && !t.Ops:
 			out = append(out, Finding{
 				Code:    CodeNoClaim,
 				Message: fmt.Sprintf("%s is open and declares no paths_owned", g.label(id)),

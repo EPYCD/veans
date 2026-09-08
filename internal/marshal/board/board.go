@@ -208,6 +208,7 @@ func (s *Snapshot) InvariantTasks() ([]invariants.Task, []invariants.Lease) {
 		if t.Scope != nil {
 			it.Paths = append(it.Paths, t.Scope.PathsOwned...)
 		}
+		it.Ops = IsOps(t)
 		it.BlockedBy = relatedIDs(t, "blocked")
 		it.Follows = relatedIDs(t, "follows")
 		if parents := relatedIDs(t, "parenttask"); len(parents) > 0 {
@@ -240,6 +241,20 @@ func BranchOf(t *client.Task) string {
 		}
 	}
 	return ""
+}
+
+// IsOps reports whether the task is operations work rather than a change to
+// the repository: something a person does to the running system, with no files
+// to claim and no pull request to receipt. Workman reads the same label to
+// exempt these from the merged-receipt rule; this is the other half, so a task
+// that can be closed no longer reports as one that forgot its claim.
+func IsOps(t *client.Task) bool {
+	for _, l := range t.Labels {
+		if l != nil && l.Title == LabelOps {
+			return true
+		}
+	}
+	return false
 }
 
 func relatedIDs(t *client.Task, kind string) []int64 {
@@ -331,6 +346,10 @@ func (b *Board) DropLabel(ctx context.Context, task *client.Task, title string) 
 	}
 	return nil
 }
+
+// LabelOps marks operations work. Unlike the labels below it is set by a human
+// on the board, not by Marshal -- Marshal only reads it.
+const LabelOps = "veans:ops"
 
 // Labels Marshal manages. They are flags, not state: the ledger has the history.
 const (
