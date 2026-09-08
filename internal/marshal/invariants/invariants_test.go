@@ -273,3 +273,47 @@ func TestCheckEmpty(t *testing.T) {
 		t.Errorf("empty report = %+v", r)
 	}
 }
+
+// An operations task edits no files. Before veans:ops it was indistinguishable
+// from a story that forgot its claim, so it reported no_claim for as long as it
+// stayed open -- and #102, #103, #104 and #175 held health_ok false for days
+// with nothing actually wrong.
+func TestOpsTaskNeedsNoClaim(t *testing.T) {
+	tasks := []Task{
+		{ID: 1, Identifier: "CY-1", Title: "Contract", Paths: []string{"src/lib/contract.ts"}},
+		{ID: 2, Identifier: "CY-2", Title: "Ops: the CI account has no minutes", Ops: true},
+	}
+	r := Check(tasks, nil, Options{})
+	if got := summarize(r.Findings); len(got) != 0 {
+		t.Errorf("an ops task should claim nothing and report nothing; got %v", got)
+	}
+	if !r.OK {
+		t.Errorf("ok = false, want true")
+	}
+
+	// The exemption is the label and nothing else: drop it and the same task
+	// reports, so this cannot silently swallow a story that forgot its claim.
+	tasks[1].Ops = false
+	r = Check(tasks, nil, Options{})
+	want := []string{"no_claim [2] []"}
+	if got := summarize(r.Findings); !reflect.DeepEqual(got, want) {
+		t.Errorf("without the label: got %v, want %v", got, want)
+	}
+	if r.OK {
+		t.Errorf("ok = true, want false")
+	}
+}
+
+// An ops task that does declare paths is treated as any other task: the label
+// says "claiming nothing is fine here", not "ignore this task".
+func TestOpsTaskWithPathsStillCollides(t *testing.T) {
+	tasks := []Task{
+		{ID: 1, Identifier: "CY-1", Title: "Story", Paths: []string{"deploy/docker-compose.yml"}},
+		{ID: 2, Identifier: "CY-2", Title: "Ops", Ops: true, Paths: []string{"deploy/docker-compose.yml"}},
+	}
+	r := Check(tasks, nil, Options{})
+	want := []string{"unordered_overlap [1 2] [deploy/docker-compose.yml]"}
+	if got := summarize(r.Findings); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
