@@ -74,7 +74,17 @@ func (s *Server) Handler() http.Handler {
 		s.mu.RLock()
 		last := s.lastTick
 		s.mu.RUnlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "last_tick": last})
+		// A ledger that cannot be written is unhealthy even though every tick
+		// still runs: it once failed for five days behind a green healthcheck.
+		// 503 is what the container healthcheck and any uptime probe act on.
+		body := map[string]any{"ok": true, "last_tick": last}
+		status := http.StatusOK
+		if msg := s.Engine.LedgerError(); msg != "" {
+			body["ok"] = false
+			body["ledger_error"] = msg
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, body)
 	})
 	mux.HandleFunc("POST /webhooks/workman", s.handleWebhook)
 	mux.Handle("GET /api/tasks/{id}/references", s.auth(s.handleTaskReferences))
@@ -138,7 +148,7 @@ func (s *Server) tick(ctx context.Context) {
 	if len(res.Errors) > 0 {
 		s.Logger.Printf("marshal: tick errors: %s", strings.Join(res.Errors, "; "))
 	} else {
-		s.Logger.Printf("marshal: tick rev=%s broken=%d pastes=%d stale=%d strays=%d health_ok=%t notified=%d", short(res.Rev), res.Broken, res.Pastes, res.Stale, res.Strays, res.HealthOK, res.Notified)
+		s.Logger.Printf("marshal: tick rev=%s broken=%d pastes=%d stale=%d strays=%d health_ok=%t ledger_ok=%t notified=%d", short(res.Rev), res.Broken, res.Pastes, res.Stale, res.Strays, res.HealthOK, s.Engine.LedgerError() == "", res.Notified)
 	}
 }
 

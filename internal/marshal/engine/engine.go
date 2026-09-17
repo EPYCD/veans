@@ -70,6 +70,12 @@ type Engine struct {
 	// and the scope. Lag is a pure function of those three, so a poll where
 	// none has moved does no git work at all.
 	lagCache map[int64]lagCacheEntry
+
+	// ledgerErr is the last ledger append failure, nil once one succeeds.
+	// Its own lock: log runs from paths that may already hold mu.
+	ledgerMu    sync.Mutex
+	ledgerErr   error
+	ledgerSince time.Time
 }
 
 // Load finds .marshal.yml from dir upward, opens the board and the state.
@@ -775,7 +781,10 @@ func (e *Engine) Workers(ctx context.Context) (*Workers, error) {
 }
 
 // log appends to the ledger, never failing the caller: the ledger is a
-// record, not a gate.
+// record, not a gate. A failure is remembered, though, and reported by
+// LedgerError until an append succeeds again -- "not a gate" once meant a
+// ledger that could not be written for five days while every health signal
+// stayed green.
 func (e *Engine) log(entry ledger.Entry) {
 	if e.Ledger == nil {
 		return
@@ -783,9 +792,32 @@ func (e *Engine) log(entry ledger.Entry) {
 	if entry.Actor == "" {
 		entry.Actor = e.Board.Identity
 	}
-	if _, err := e.Ledger.Append(entry); err != nil {
+	_, err := e.Ledger.Append(entry)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "marshal: ledger: %v\n", err)
 	}
+	e.ledgerMu.Lock()
+	defer e.ledgerMu.Unlock()
+	if err != nil {
+		if e.ledgerErr == nil {
+			e.ledgerSince = time.Now().UTC()
+		}
+		e.ledgerErr = err
+		return
+	}
+	e.ledgerErr = nil
+	e.ledgerSince = time.Time{}
+}
+
+// LedgerError describes the most recent ledger write failure and when the
+// failures began, or returns "" when the last write succeeded.
+func (e *Engine) LedgerError() string {
+	e.ledgerMu.Lock()
+	defer e.ledgerMu.Unlock()
+	if e.ledgerErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v (failing since %s)", e.ledgerErr, e.ledgerSince.Format(time.RFC3339))
 }
 
 // Log is the exported form for callers outside the package.
