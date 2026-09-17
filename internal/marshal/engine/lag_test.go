@@ -17,11 +17,18 @@
 package engine
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"code.vikunja.io/veans/internal/client"
 	"code.vikunja.io/veans/internal/marshal/board"
+	"code.vikunja.io/veans/internal/marshal/ledger"
 )
 
 // TestSeverityFor is the severity ladder, which is what makes lag worth
@@ -243,4 +250,96 @@ func TestResolveLanded(t *testing.T) {
 	if unknown.LandedByTaskID != 0 {
 		t.Errorf("a ref naming no task must not be invented: %+v", unknown)
 	}
+}
+
+// TestPublishLagReportSurfacesWriteFailures pins the case that hid a broken
+// deployment for a day: lag was measured on every poll, every write to the
+// board was refused, and marshal said nothing at all. The counters moved, the
+// health endpoint looked normal, and the only evidence was an empty table
+// nobody was watching.
+//
+// A tick where every write fails must be louder than a tick where nothing
+// needed writing, not quieter.
+func TestPublishLagReportSurfacesWriteFailures(t *testing.T) {
+	// A board that refuses every lag write, which is exactly what a bot token
+	// minted before the lag routes existed does — 401, not 403, because the
+	// route is absent from the token's permission map rather than forbidden.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":11,"message":"invalid token provided"}`))
+	}))
+	defer srv.Close()
+
+	led, err := ledger.Open(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+
+	e := &Engine{
+		Board:  &board.Board{Client: client.New(srv.URL, "tk_test"), Identity: "marshal"},
+		Ledger: led,
+	}
+
+	task := &client.Task{ID: 7}
+	snap := &board.Snapshot{Tasks: []*client.Task{task}, ByID: map[int64]*client.Task{7: task}}
+	rep := &LagReport{
+		Base: "origin/main",
+		Branches: []*BranchLag{{
+			TaskRef: TaskRef{TaskID: 7},
+			Lag:     &client.TaskLag{Severity: client.LagSeverityAffected},
+		}},
+	}
+	res := &TickResult{LagBehind: 1}
+
+	e.publishLagReport(context.Background(), snap, rep, res)
+
+	// The report's errors are filled in by PublishLag itself, so a copy taken
+	// before the call — which is what this used to do — captures none of them.
+	if len(res.Errors) == 0 {
+		t.Error("every lag write failed and the tick reported no errors")
+	}
+
+	entries := readLedger(t, led.Path())
+	var found *ledger.Entry
+	for i := range entries {
+		if entries[i].Action == "lag" {
+			found = &entries[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("every lag write failed and nothing was recorded in the ledger")
+	}
+	if found.Outcome != "error" {
+		t.Errorf("ledger outcome = %q, want %q", found.Outcome, "error")
+	}
+	if got := found.Metadata["written"]; got != float64(0) {
+		t.Errorf("ledger metadata written = %v, want 0", got)
+	}
+}
+
+func readLedger(t *testing.T, path string) []ledger.Entry {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open ledger file: %v", err)
+	}
+	defer f.Close()
+
+	var out []ledger.Entry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if len(sc.Bytes()) == 0 {
+			continue
+		}
+		var ent ledger.Entry
+		if err := json.Unmarshal(sc.Bytes(), &ent); err != nil {
+			t.Fatalf("decode ledger line: %v", err)
+		}
+		out = append(out, ent)
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	return out
 }

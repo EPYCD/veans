@@ -141,21 +141,50 @@ func (e *Engine) recordLag(ctx context.Context, snap *board.Snapshot, base strin
 		res.Errors = append(res.Errors, "lag: "+err.Error())
 		return
 	}
-	res.Errors = append(res.Errors, rep.Errors...)
 	res.LagBehind = len(rep.Branches)
 	for _, b := range rep.Branches {
 		if b.Lag.Blocking() {
 			res.LagBlocking++
 		}
 	}
+	e.publishLagReport(ctx, snap, rep, res)
+}
+
+// publishLagReport writes the report to the board and accounts for what
+// happened, including when nothing did.
+//
+// Both halves of that are deliberate, and both were wrong before. The errors
+// are copied AFTER PublishLag because that is when it fills them in: copying
+// rep.Errors before the call kept the measurement errors and dropped every
+// write failure, which are the ones worth seeing. And the ledger entry is
+// written whenever there were branches to publish, not only when a write
+// succeeded, because "every single write failed" used to produce no entry, no
+// error line and no moving counter — the quietest tick of all, and
+// indistinguishable from a healthy one with nothing to do.
+//
+// This is not hypothetical: it hid a bot token minted before the lag routes
+// existed for a full day. Lag was computed every minute, 401'd on every write,
+// and said nothing.
+func (e *Engine) publishLagReport(ctx context.Context, snap *board.Snapshot, rep *LagReport, res *TickResult) {
 	written, cleared := e.PublishLag(ctx, snap, rep)
 	res.LagCleared = cleared
-	if written > 0 || cleared > 0 {
-		e.log(ledger.Entry{
-			Action: "lag", Subject: rep.Base, Outcome: "ok",
-			Metadata: map[string]any{"behind": res.LagBehind, "blocking": res.LagBlocking, "cleared": cleared, "cached": rep.Cached},
-		})
+	res.Errors = append(res.Errors, rep.Errors...)
+
+	if written == 0 && cleared == 0 && len(rep.Branches) == 0 {
+		return
 	}
+	outcome := "ok"
+	if len(rep.Errors) > 0 {
+		outcome = "error"
+	}
+	e.log(ledger.Entry{
+		Action: "lag", Subject: rep.Base, Outcome: outcome,
+		Metadata: map[string]any{
+			"behind": res.LagBehind, "blocking": res.LagBlocking,
+			"written": written, "cleared": cleared,
+			"cached": rep.Cached, "errors": len(rep.Errors),
+		},
+	})
 }
 
 func (e *Engine) fetchSpec(ctx context.Context) error {
