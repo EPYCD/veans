@@ -63,7 +63,7 @@ This is not "release". That drops leases and deliberately keeps the assignee,
 for abandoning the work while keeping the ticket.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

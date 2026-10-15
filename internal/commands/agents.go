@@ -29,7 +29,7 @@ func newAgentsCmd() *cobra.Command {
 		Short: "Who is working in the project: bots with their owners, and humans",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

@@ -150,6 +150,8 @@ type Task struct {
 	// Lag arrives with expand=lag; nil when the branch is current or has
 	// never been measured.
 	Lag *TaskLag `json:"lag,omitempty"`
+	// URL is not on the wire; commands fill it before printing.
+	URL string `json:"url,omitempty"`
 }
 
 // Lag severities, worst first. Mirrors the board's models.TaskLag; keep them

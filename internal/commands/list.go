@@ -57,7 +57,7 @@ Filters can be combined; they're AND-ed together:
   --status <s>     filter by status (todo|in-progress|in-review|completed|scrapped),
                    may be repeated`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -68,6 +68,7 @@ Filters can be combined; they're AND-ed together:
 			if f.first && len(tasks) > 1 {
 				tasks = tasks[:1]
 			}
+			rt.withURLs(tasks...)
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(tasks)
 		},
 	}

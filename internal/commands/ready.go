@@ -47,7 +47,7 @@ task not ready, while "affected" and "elsewhere" are reported and gate nothing.
 ` + "`veans list --ready`" + ` is the same query reduced to the tasks that are ready.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

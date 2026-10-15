@@ -32,7 +32,7 @@ update and comment you make on the task counts as activity already; run this
 when you work for a long time without touching the board.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

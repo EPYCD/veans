@@ -53,7 +53,7 @@ The lag it reads is computed by Marshal on its poll, so a branch you pushed
 seconds ago may not be reflected yet.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

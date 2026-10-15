@@ -50,7 +50,7 @@ outside them — widen the scope (veans scope), split the work into another
 task, or hand the file back. The PR check runs the same query.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
