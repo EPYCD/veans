@@ -51,7 +51,7 @@ the next reader nothing while making "veans list --branch" under-report. Claim
 again once you are on the branch, or pass --branch to name it up front.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -115,6 +115,7 @@ again once you are on the branch, or pass --branch to name it up front.`,
 				}
 			}
 
+			rt.withURLs(task)
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(task)
 		},
 	}

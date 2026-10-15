@@ -58,7 +58,7 @@ stdin and as $VEANS_EVENT). --once prints the current ready tasks as
 task.ready events and exits, for cron.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}

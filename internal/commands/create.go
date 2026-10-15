@@ -66,7 +66,7 @@ is exclusion enforced by comparing strings: two spellings of one file are two
 claims that cannot see each other.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -76,6 +76,7 @@ claims that cannot see each other.`,
 			if err != nil {
 				return err
 			}
+			rt.withURLs(task)
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(task)
 		},
 	}

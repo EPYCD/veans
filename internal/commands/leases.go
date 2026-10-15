@@ -35,7 +35,7 @@ paths-owned is claimed and disappear when it is done, scrapped, deleted or
 released.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -62,7 +62,7 @@ Finishing (in-review does not release; done and scrapped do) and deleting a
 task release automatically. Idempotent.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := loadRuntime()
+			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -77,6 +77,7 @@ task release automatically. Idempotent.`,
 			if err != nil {
 				return err
 			}
+			rt.withURLs(task)
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(task)
 		},
 	}
