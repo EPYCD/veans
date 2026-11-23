@@ -18,7 +18,6 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
@@ -48,17 +47,29 @@ type updateFlags struct {
 	ifUnchangedSince string
 	// force overrides the review gate: a branch behind the integration branch
 	// in a file it owns is normally refused entry to review.
-	force bool
+	force           bool
+	parent          string
+	noParent        bool
+	addBlockedBy    []string
+	removeBlockedBy []string
+	attach          []string
 }
 
 func newUpdateCmd() *cobra.Command {
 	f := &updateFlags{}
+	var (
+		fieldsRaw string
+		taskIDArg int64
+	)
 	cmd := &cobra.Command{
-		Use:     "update <id>",
+		Use:     "update <PROJ-NN|#NN|NN> | update --id <task id>",
 		Aliases: []string{"u"},
-		Short:   "Update a task by PROJ-NN, #NN, or numeric ID",
-		Args:    cobra.ExactArgs(1),
+		Short:   "Update a task by PROJ-NN, #NN, NN (project index), or --id <task id>",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fields, err := parseFields(fieldsRaw)
+			if err != nil {
+				return err
+			}
 			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
@@ -66,7 +77,7 @@ func newUpdateCmd() *cobra.Command {
 			f.descriptionIsSet = cmd.Flags().Changed("description")
 			f.priorityIsSet = cmd.Flags().Changed("priority")
 
-			id, err := rt.resolveTaskID(cmd.Context(), args[0])
+			id, err := rt.taskID(cmd.Context(), args, taskIDArg)
 			if err != nil {
 				return err
 			}
@@ -74,8 +85,7 @@ func newUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rt.withURLs(task)
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(task)
+			return rt.printTask(cmd.OutOrStdout(), fields, task)
 		},
 	}
 	cmd.Flags().StringVarP(&f.statusName, "status", "s", "", "transition to a status")
@@ -91,6 +101,14 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.reason, "reason", "", "rationale (required when --status scrapped)")
 	cmd.Flags().StringVar(&f.ifUnchangedSince, "if-unchanged-since", "", "RFC3339 timestamp; abort if the task has changed since")
 	cmd.Flags().BoolVar(&f.force, "force", false, "send to review even though the branch is behind in a file it owns (recorded as a comment on the task)")
+	cmd.Flags().StringVar(&f.parent, "parent", "", "set the parent task (replaces any existing parent)")
+	cmd.Flags().BoolVar(&f.noParent, "no-parent", false, "remove the parent task")
+	cmd.MarkFlagsMutuallyExclusive("parent", "no-parent")
+	cmd.Flags().StringSliceVar(&f.addBlockedBy, "blocked-by-add", nil, "task IDs that block this one (repeatable)")
+	cmd.Flags().StringSliceVar(&f.removeBlockedBy, "blocked-by-remove", nil, "task IDs that no longer block this one (repeatable)")
+	addAttachFlag(cmd, &f.attach)
+	cmd.Args = addTaskIDFlag(cmd, &taskIDArg)
+	addFieldsFlag(cmd, &fieldsRaw)
 	return cmd
 }
 
@@ -131,6 +149,28 @@ func runUpdate(ctx context.Context, rt *runtime, id int64, f *updateFlags) (*cli
 		if s == status.Scrapped && strings.TrimSpace(f.reason) == "" {
 			return nil, output.New(output.CodeValidation, "--reason is required when --status scrapped")
 		}
+	}
+
+	var parentID int64
+	if f.parent != "" {
+		if parentID, err = rt.resolveTaskID(ctx, f.parent); err != nil {
+			return nil, err
+		}
+		if parentID == id {
+			return nil, output.New(output.CodeValidation, "a task cannot be its own parent")
+		}
+	}
+
+	addBlockers, err := resolveRefs(ctx, rt, f.addBlockedBy)
+	if err != nil {
+		return nil, err
+	}
+	removeBlockers, err := resolveRefs(ctx, rt, f.removeBlockedBy)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkAttachPaths(f.attach); err != nil {
+		return nil, err
 	}
 
 	// The review gate. A branch behind the integration branch in a file it
@@ -188,17 +228,21 @@ func runUpdate(ctx context.Context, rt *runtime, id int64, f *updateFlags) (*cli
 		dirty = true
 	}
 
+	progress := &steps{task: rt.cfg.FormatTaskID(current.Index)}
+
 	// Comment first when transitioning to scrapped — the reason is part of
 	// the audit trail and should appear before the bucket move in the log.
 	if newStatus == status.Scrapped {
 		if _, err := rt.client.AddTaskComment(ctx, id, "<strong>Scrapped:</strong> "+strings.TrimSpace(f.reason)); err != nil {
-			return nil, err
+			return nil, progress.fail("scrapped comment", err)
 		}
+		progress.done("scrapped comment")
 	}
 	if f.comment != "" {
 		if _, err := rt.client.AddTaskComment(ctx, id, f.comment); err != nil {
-			return nil, err
+			return nil, progress.fail("comment", err)
 		}
+		progress.done("comment")
 	}
 
 	// Apply the field update if anything changed.
@@ -206,41 +250,99 @@ func runUpdate(ctx context.Context, rt *runtime, id int64, f *updateFlags) (*cli
 	if dirty {
 		u, err := rt.client.UpdateTask(ctx, id, body)
 		if err != nil {
-			return nil, err
+			return nil, progress.fail("update fields", err)
 		}
 		updated = u
+		progress.done("update fields")
 	}
 
 	// Move the task between buckets after the field update.
 	if bucketTransitionTarget != 0 {
 		if err := rt.client.MoveTaskToBucket(ctx,
 			rt.cfg.ProjectID, rt.cfg.ViewID, bucketTransitionTarget, id); err != nil {
-			return nil, err
+			return nil, progress.fail("set bucket", err)
 		}
+		progress.done("set bucket")
+	}
+
+	// The board frees a task's path leases when it flips to done, and scrapped
+	// is not a done flip. Abandoned work must not keep its files locked, so
+	// release them here. Skipped when the task holds none: the release posts
+	// an event either way, and there is nothing to announce.
+	if newStatus == status.Scrapped && len(current.Leases) > 0 {
+		if err := rt.client.ReleaseTaskLeases(ctx, id); err != nil {
+			return nil, progress.fail("release leases", err)
+		}
+		progress.done("release leases")
 	}
 
 	// Label add/remove run after the field update so a status transition
 	// can't clobber freshly-attached labels.
 	for _, raw := range f.addLabels {
 		title := normalizeLabelTitle(raw)
+		step := "label-add " + title
 		l, err := getOrCreateLabelByTitle(ctx, rt.client, title)
 		if err != nil {
-			return nil, err
+			return nil, progress.fail(step, err)
 		}
 		if err := rt.client.AddLabelToTask(ctx, id, l.ID); err != nil {
-			return nil, err
+			return nil, progress.fail(step, err)
 		}
+		progress.done(step)
 	}
 	for _, raw := range f.removeLabels {
 		title := normalizeLabelTitle(raw)
 		if l := findLabelOnTask(updated, title); l != nil {
+			step := "label-remove " + title
 			if err := rt.client.RemoveLabelFromTask(ctx, id, l.ID); err != nil {
-				return nil, err
+				return nil, progress.fail(step, err)
 			}
+			progress.done(step)
 		}
 	}
 
-	if len(f.addLabels) > 0 || len(f.removeLabels) > 0 || bucketTransitionTarget != 0 {
+	parentChanged := f.parent != "" || f.noParent
+	if parentChanged {
+		if err := setParent(ctx, rt, current, parentID, progress); err != nil {
+			return nil, err
+		}
+	}
+
+	blocked := map[int64]bool{}
+	for _, b := range current.RelatedTasks["blocked"] {
+		if b != nil {
+			blocked[b.ID] = true
+		}
+	}
+	for i, blockerID := range addBlockers {
+		if blocked[blockerID] {
+			continue
+		}
+		step := "blocked-by-add " + f.addBlockedBy[i]
+		if _, err := rt.client.CreateRelation(ctx, id, blockerID, "blocked"); err != nil {
+			return nil, progress.fail(step, err)
+		}
+		blocked[blockerID] = true
+		progress.done(step)
+	}
+	for i, blockerID := range removeBlockers {
+		if !blocked[blockerID] {
+			continue
+		}
+		step := "blocked-by-remove " + f.removeBlockedBy[i]
+		if err := rt.client.DeleteRelation(ctx, id, blockerID, "blocked"); err != nil {
+			return nil, progress.fail(step, err)
+		}
+		delete(blocked, blockerID)
+		progress.done(step)
+	}
+	relationsChanged := parentChanged || len(addBlockers) > 0 || len(removeBlockers) > 0
+
+	if err := attachFiles(ctx, rt, id, f.attach, progress); err != nil {
+		return nil, err
+	}
+
+	if len(f.addLabels) > 0 || len(f.removeLabels) > 0 || bucketTransitionTarget != 0 || relationsChanged || len(f.attach) > 0 {
 		fresh, err := rt.client.GetTask(ctx, id)
 		if err == nil {
 			updated = fresh
@@ -282,6 +384,47 @@ func checkReviewLag(ctx context.Context, rt *runtime, id int64, current *client.
 	if _, err := rt.client.AddTaskComment(ctx, id, b.String()); err != nil {
 		return err
 	}
+	return nil
+}
+
+func resolveRefs(ctx context.Context, rt *runtime, refs []string) ([]int64, error) {
+	ids := make([]int64, len(refs))
+	for i, ref := range refs {
+		var err error
+		if ids[i], err = rt.resolveTaskID(ctx, ref); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// setParent makes parentID the task's only parent; 0 removes all parents.
+func setParent(ctx context.Context, rt *runtime, task *client.Task, parentID int64, progress *steps) error {
+	hasParent := false
+	for _, p := range task.RelatedTasks["parenttask"] {
+		if p == nil {
+			continue
+		}
+		if p.ID == parentID {
+			hasParent = true
+			continue
+		}
+		step := fmt.Sprintf("remove parent %d", p.ID)
+		if p.Identifier != "" {
+			step = "remove parent " + p.Identifier
+		}
+		if err := rt.client.DeleteRelation(ctx, task.ID, p.ID, "parenttask"); err != nil {
+			return progress.fail(step, err)
+		}
+		progress.done(step)
+	}
+	if parentID == 0 || hasParent {
+		return nil
+	}
+	if _, err := rt.client.CreateRelation(ctx, task.ID, parentID, "parenttask"); err != nil {
+		return progress.fail("set parent", err)
+	}
+	progress.done("set parent")
 	return nil
 }
 

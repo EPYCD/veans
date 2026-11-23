@@ -77,8 +77,7 @@ task release automatically. Idempotent.`,
 			if err != nil {
 				return err
 			}
-			rt.withURLs(task)
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(task)
+			return rt.printTask(cmd.OutOrStdout(), nil, task)
 		},
 	}
 }

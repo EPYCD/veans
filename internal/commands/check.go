@@ -207,14 +207,21 @@ func refsFromCommits(ctx context.Context, base string) ([]string, error) {
 	return refs, nil
 }
 
-// claimedTaskIDs lists the open tasks assigned to the bot.
+// claimedTaskIDs lists the open tasks assigned to the bot. Scrapped tasks are
+// done=false but not open: their scope must not excuse a changed file.
 func claimedTaskIDs(ctx context.Context, rt *runtime) ([]int64, error) {
-	tasks, err := rt.client.ListProjectTasks(ctx, rt.cfg.ProjectID, &client.TaskListOptions{Filter: "done = false"})
+	tasks, err := rt.client.ListProjectTasks(ctx, rt.cfg.ProjectID, &client.TaskListOptions{
+		Filter: "done = false",
+		Expand: []string{"buckets"},
+	})
 	if err != nil {
 		return nil, err
 	}
 	ids := []int64{}
 	for _, t := range tasks {
+		if scrapped := rt.cfg.Buckets.Scrapped; scrapped != 0 && t.CurrentBucketID(rt.cfg.ViewID) == scrapped {
+			continue
+		}
 		if !t.Done && taskAssignedTo(t, rt.cfg.Bot.UserID) {
 			ids = append(ids, t.ID)
 		}

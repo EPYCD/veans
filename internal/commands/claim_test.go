@@ -19,10 +19,19 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"code.vikunja.io/veans/internal/output"
 )
 
 // gitRepo builds a real repository with an "origin" remote, because the whole
@@ -161,4 +170,107 @@ func TestClaimBranch_OutsideARepository(t *testing.T) {
 			t.Errorf("nothing to warn about: %q", warn.String())
 		}
 	})
+}
+
+// claimServer answers the atomic claim and the reads around it. refuse decides
+// what POST /tasks/42/claim says: 0 for a claim that takes (or re-takes) the
+// task, an HTTP status for a refusal.
+func claimServer(t *testing.T, labels []string, refuse int) (*httptest.Server, *[]recordedCall) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		calls []recordedCall
+	)
+	task := map[string]any{"id": 42, "index": 7, "title": "t", "assignees": []map[string]any{{"id": 5}}}
+	ls := []map[string]any{}
+	for i, l := range labels {
+		ls = append(ls, map[string]any{"id": 100 + i, "title": l})
+	}
+	task["labels"] = ls
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, recordedCall{method: r.Method, path: r.URL.Path})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/tasks/42/claim":
+			if refuse != 0 {
+				w.WriteHeader(refuse)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "refused"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(task)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/tasks/42":
+			_ = json.NewEncoder(w).Encode(task)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/labels":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "total_pages": 1})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/labels":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99, "title": "veans:branch:feat"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/tasks/42/labels":
+			http.Error(w, `{"message":"no"}`, http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// TestRunClaim_RepeatIsANoOp: claiming a task you already hold succeeds, and
+// costs exactly the atomic claim plus one read — no assignee write, no label
+// write, nothing the server could answer "already there" to.
+func TestRunClaim_RepeatIsANoOp(t *testing.T) {
+	srv, calls := claimServer(t, []string{"veans:branch:feat"}, 0)
+	rt := newTestRuntime(srv.URL)
+
+	for range 2 {
+		if _, err := runClaim(context.Background(), rt, 42, &claimOptions{ref: "#7", branch: "feat", warn: io.Discard}); err != nil {
+			t.Fatalf("runClaim: %v", err)
+		}
+	}
+
+	once := []recordedCall{
+		{http.MethodPost, "/api/v2/tasks/42/claim"},
+		{http.MethodGet, "/api/v2/tasks/42"},
+	}
+	if want := append(append([]recordedCall{}, once...), once...); !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("calls:\nwant: %#v\ngot:  %#v", want, *calls)
+	}
+}
+
+// TestRunClaim_ConflictTouchesNothingElse: a refused claim is the end of it.
+// No read, no label — the task belongs to somebody else.
+func TestRunClaim_ConflictTouchesNothingElse(t *testing.T) {
+	srv, calls := claimServer(t, nil, http.StatusConflict)
+	rt := newTestRuntime(srv.URL)
+
+	_, err := runClaim(context.Background(), rt, 42, &claimOptions{ref: "#7", branch: "feat", warn: io.Discard})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != output.CodeConflict {
+		t.Fatalf("want CONFLICT, got %v", err)
+	}
+	if oe.Task != "" || len(oe.Completed) != 0 {
+		t.Fatalf("a refused claim changed nothing and must not report progress: %+v", oe)
+	}
+	if want := []recordedCall{{http.MethodPost, "/api/v2/tasks/42/claim"}}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("calls:\nwant: %#v\ngot:  %#v", want, *calls)
+	}
+}
+
+// TestRunClaim_LabelFailureReportsTheClaim: the claim took, the label did not.
+// The error has to say the task is already held, or the caller retries a claim
+// that is not the problem.
+func TestRunClaim_LabelFailureReportsTheClaim(t *testing.T) {
+	srv, _ := claimServer(t, nil, 0)
+	rt := newTestRuntime(srv.URL)
+
+	_, err := runClaim(context.Background(), rt, 42, &claimOptions{ref: "#7", branch: "feat", warn: io.Discard})
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want an output.Error, got %v", err)
+	}
+	if oe.Task != "#7" || !reflect.DeepEqual(oe.Completed, []string{"claim"}) || oe.Failed != "label veans:branch:feat" {
+		t.Fatalf("partial progress not reported: task=%q completed=%v failed=%q", oe.Task, oe.Completed, oe.Failed)
+	}
 }

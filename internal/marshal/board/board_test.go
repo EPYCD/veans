@@ -74,6 +74,43 @@ func TestInvariantTasksCompletedEpicStaysAContainer(t *testing.T) {
 	}
 }
 
+// A scrapped task is done=false on the wire but closed for every check: it
+// owes no claim, and a lease it still holds has no open task behind it.
+func TestSplitScrappedClosesScrappedTasks(t *testing.T) {
+	const view, scrappedBucket = int64(1), int64(14)
+	live := &client.Task{ID: 1, Identifier: "#1", Scope: &client.TaskScope{PathsOwned: []string{"pkg/a/**"}},
+		Buckets: []*client.Bucket{{ID: 11, ProjectViewID: view}}}
+	gone := &client.Task{ID: 2, Identifier: "#2",
+		Buckets: []*client.Bucket{{ID: scrappedBucket, ProjectViewID: view}}}
+
+	open, scrapped := splitScrapped([]*client.Task{live, gone}, view, scrappedBucket)
+	if len(open) != 1 || open[0] != live || len(scrapped) != 1 || scrapped[0] != gone {
+		t.Fatalf("split = open %v, scrapped %v", open, scrapped)
+	}
+
+	s := &Snapshot{Tasks: open, DoneTasks: scrapped,
+		Leases: []*client.TaskPathLease{{TaskID: 2, Pattern: "pkg/b/**"}}}
+	tasks, leases := s.InvariantTasks()
+	rep := invariants.Check(tasks, leases, invariants.Options{})
+	if !rep.OK || rep.Tasks != 1 {
+		t.Fatalf("scrapped task still judged as open: tasks=%d findings=%+v", rep.Tasks, rep.Findings)
+	}
+	var leaked bool
+	for _, f := range rep.Findings {
+		if f.Code == invariants.CodeLeaseWithoutTask {
+			leaked = true
+		}
+	}
+	if !leaked {
+		t.Fatalf("a lease held by a scrapped task should be reported: %+v", rep.Findings)
+	}
+
+	// No Scrapped bucket configured: nothing moves.
+	if open, scrapped := splitScrapped([]*client.Task{live, gone}, view, 0); len(open) != 2 || scrapped != nil {
+		t.Fatalf("split without a scrapped bucket = open %v, scrapped %v", open, scrapped)
+	}
+}
+
 // The exemption is only for parents. A childless open task with no claim is
 // still a finding, so the fix above cannot quietly excuse every task.
 func TestInvariantTasksChildlessTaskStillNeedsAClaim(t *testing.T) {

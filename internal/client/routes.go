@@ -42,10 +42,8 @@ func (c *Client) Routes(ctx context.Context) (map[string]RouteGroup, error) {
 // the server are silently dropped, so the resulting permission map is
 // always valid for POST /tokens regardless of Vikunja version.
 //
-// The action names reflect Vikunja's actual route map (see GET /routes):
-// bucket CRUD and the bucket-task move endpoint live under the `projects`
-// group as `views_buckets*` and `views_buckets_tasks`, not a separate
-// `buckets` group.
+// Keys whose names changed with GHSA-j5v7 (buckets, scope, lag, plan,
+// receipts) are requested under both the current and the old name.
 func PermissionsForBot(routes map[string]RouteGroup) map[string][]string {
 	wanted := map[string][]string{
 		// Read + write tasks across the project. The bot creates, updates,
@@ -58,34 +56,30 @@ func PermissionsForBot(routes map[string]RouteGroup) map[string][]string {
 		"tasks": {
 			"read_one", "read_all", "create", "update", "position",
 			"read", "update_bulk", "claim",
-			"scope", "scope_get", "scope_put", "scope_delete",
+			"scope", "scope_get", "scope_update", "scope_put", "scope_delete",
 			"leases", "leases_delete", "leases_heartbeat", "receipts",
 			// Branch lag: Marshal writes it, veans check/sync/update read it.
-			// All four spellings for the same reason as scope — which of the
-			// three methods takes the bare subkey depends on unspecified
-			// route-init order, and the runtime intersection drops the rest.
-			"lag", "lag_get", "lag_put", "lag_delete",
+			// Servers before GHSA-j5v7 named the write by registration order
+			// (lag_put, sometimes lag_get), later ones by action (lag_update);
+			// the runtime intersection drops whichever the server lacks.
+			"lag", "lag_get", "lag_update", "lag_put", "lag_delete",
 		},
 		// Project access: read project metadata, manage buckets & move
 		// tasks between them. tasks_by-index resolves #NN / PROJ-NN.
-		// The bucket-task MOVE (PUT .../buckets/:bucket/tasks) and the
-		// buckets-with-tasks LIST (GET .../buckets/tasks) collide on subkey
-		// `views_buckets_tasks`; which one gets the bare key vs the
-		// `_put`-suffixed key depends on unspecified route-init order, so we
-		// request BOTH and let the runtime intersection drop whichever the
-		// server didn't register.
 		"projects": {
 			"read_one", "read_all", "tasks_by-index", "tasks_by_index",
-			"views_buckets", "views_buckets_put", "views_buckets_post",
-			"views_buckets_delete", "views_buckets_tasks", "views_buckets_tasks_put",
-			"leases", "views_readiness", "scope_check", "plan", "plan_get", "agents",
+			"views_buckets", "views_buckets_create", "views_buckets_update",
+			"views_buckets_delete", "views_buckets_tasks", "views_buckets_tasks_update",
+			"views_buckets_put", "views_buckets_post", "views_buckets_tasks_put",
+			"leases", "views_readiness", "scope_check", "plan", "plan_create", "plan_get", "agents",
 		},
-		"projects_views":  {"read_one", "read_all"},
-		"labels":          {"read_one", "read_all", "create", "update", "delete"},
-		"tasks_comments":  {"read_one", "read_all", "create", "update", "delete"},
-		"tasks_relations": {"create", "delete"},
-		"tasks_assignees": {"read_all", "create", "delete", "update_bulk"},
-		"tasks_labels":    {"create", "delete", "read_all", "update_bulk"},
+		"projects_views":    {"read_one", "read_all"},
+		"labels":            {"read_one", "read_all", "create", "update", "delete"},
+		"tasks_comments":    {"read_one", "read_all", "create", "update", "delete"},
+		"tasks_relations":   {"create", "delete"},
+		"tasks_assignees":   {"read_all", "create", "delete", "update_bulk"},
+		"tasks_labels":      {"create", "delete", "read_all", "update_bulk"},
+		"tasks_attachments": {"read_one", "read_all", "create"},
 	}
 	return pickPermissions(routes, wanted)
 }
@@ -108,9 +102,9 @@ func PermissionsForCI(routes map[string]RouteGroup) map[string][]string {
 		// whose branch is behind in a file it owns, and needs to see the
 		// record to do it. It has no business writing one — that is Marshal's
 		// job, and Marshal has its own identity.
-		"tasks":          {"read_one", "update", "read", "receipts", "receipts_post", "lag", "lag_get"},
+		"tasks":          {"read_one", "update", "read", "receipts", "receipts_create", "receipts_post", "lag", "lag_get"},
 		"tasks_comments": {"create", "read_all"},
-		"projects":       {"read_one", "tasks_by-index", "tasks_by_index", "views_buckets_tasks", "views_buckets_tasks_put", "leases", "scope_check", "webhooks", "webhooks_get"},
+		"projects":       {"read_one", "tasks_by-index", "tasks_by_index", "views_buckets_tasks", "views_buckets_tasks_update", "views_buckets_tasks_put", "leases", "scope_check", "webhooks", "webhooks_get"},
 		"projects_views": {"read_one", "read_all"},
 	}
 	return pickPermissions(routes, wanted)

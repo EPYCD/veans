@@ -266,6 +266,16 @@ func (t *tools) reportStatus(ctx context.Context, args json.RawMessage) (mcp.Res
 	if err != nil {
 		return refusal(err)
 	}
+	// Scrapped is done=false, and the board frees leases only on a done flip:
+	// without this an abandoned task keeps its files locked.
+	if bucket == cfg.Buckets.Scrapped && len(updated.Leases) > 0 {
+		if err := t.e.Board.Client.ReleaseTaskLeases(ctx, task.ID); err != nil {
+			t.e.Log(ledger.Entry{Action: "release", TaskID: task.ID, Subject: task.Identifier, Outcome: "refused", Reason: err.Error()})
+			return refusal(err)
+		}
+		t.e.Log(ledger.Entry{Action: "release", TaskID: task.ID, Subject: task.Identifier, Outcome: "ok"})
+		updated.Leases = nil
+	}
 	return result(updated)
 }
 

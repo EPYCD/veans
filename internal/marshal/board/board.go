@@ -236,11 +236,34 @@ func (b *Board) Snapshot(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	tasks, scrapped := splitScrapped(tasks, b.Cfg.ViewID, b.Cfg.Buckets.Scrapped)
+	doneTasks = append(doneTasks, scrapped...)
 	s := &Snapshot{Tasks: tasks, DoneTasks: doneTasks, ByID: map[int64]*client.Task{}, Leases: leases}
 	for _, t := range tasks {
 		s.ByID[t.ID] = t
 	}
 	return s, nil
+}
+
+// splitScrapped takes the tasks sitting in the Scrapped bucket out of the open
+// set. A scrapped task is done=false on the wire — the board un-marks anything
+// that leaves the done bucket — but it is finished as far as every check here
+// is concerned: nobody will claim it, it owes no paths, and a lease it still
+// holds is a lease without a task. With no Scrapped bucket configured nothing
+// moves.
+func splitScrapped(tasks []*client.Task, viewID, scrappedBucket int64) (open, scrapped []*client.Task) {
+	if scrappedBucket == 0 {
+		return tasks, nil
+	}
+	open = make([]*client.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if t.CurrentBucketID(viewID) == scrappedBucket {
+			scrapped = append(scrapped, t)
+			continue
+		}
+		open = append(open, t)
+	}
+	return open, scrapped
 }
 
 // InvariantTasks converts the snapshot into the invariants checker's input.
@@ -291,7 +314,7 @@ func BranchOf(t *client.Task) string {
 
 // IsOps reports whether the task is operations work rather than a change to
 // the repository: something a person does to the running system, with no files
-// to claim and no pull request to receipt. Workman reads the same label to
+// to claim and no pull request to receipt. The board reads the same label to
 // exempt these from the merged-receipt rule; this is the other half, so a task
 // that can be closed no longer reports as one that forgot its claim.
 func IsOps(t *client.Task) bool {

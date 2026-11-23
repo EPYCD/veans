@@ -18,7 +18,6 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -39,6 +38,7 @@ type listFlags struct {
 
 func newListCmd() *cobra.Command {
 	f := &listFlags{}
+	var fieldsRaw string
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
@@ -57,6 +57,10 @@ Filters can be combined; they're AND-ed together:
   --status <s>     filter by status (todo|in-progress|in-review|completed|scrapped),
                    may be repeated`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			fields, err := parseFields(fieldsRaw)
+			if err != nil {
+				return err
+			}
 			rt, err := loadRuntime(cmd.Context())
 			if err != nil {
 				return err
@@ -68,8 +72,7 @@ Filters can be combined; they're AND-ed together:
 			if f.first && len(tasks) > 1 {
 				tasks = tasks[:1]
 			}
-			rt.withURLs(tasks...)
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(tasks)
+			return rt.printTasks(cmd.OutOrStdout(), fields, tasks)
 		},
 	}
 	cmd.Flags().BoolVar(&f.ready, "ready", false, "only tasks the server reports as claimable right now, in queue order (the board's drag order)")
@@ -79,6 +82,7 @@ Filters can be combined; they're AND-ed together:
 	cmd.Flags().Lookup("branch").NoOptDefVal = "__auto__"
 	cmd.Flags().StringVar(&f.filter, "filter", "", "raw Vikunja filter expression, applied server-side")
 	cmd.Flags().StringSliceVar(&f.statuses, "status", nil, "filter by status (repeatable)")
+	addFieldsFlag(cmd, &fieldsRaw)
 	return cmd
 }
 
