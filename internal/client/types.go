@@ -143,6 +143,7 @@ type Task struct {
 	DueDate      *time.Time         `json:"due_date,omitempty"`
 	EndDate      *time.Time         `json:"end_date,omitempty"`
 	PercentDone  float64            `json:"percent_done,omitempty"`
+	Attachments  []*TaskAttachment  `json:"attachments,omitempty"`
 	// Scope and Leases only arrive with expand=scope / expand=leases, which
 	// GetTask always requests; list reads leave them nil.
 	Scope  *TaskScope       `json:"scope,omitempty"`
@@ -247,6 +248,24 @@ type TaskPatch struct {
 	Description *string `json:"description,omitempty"`
 	Done        *bool   `json:"done,omitempty"`
 	Priority    *int64  `json:"priority,omitempty"`
+}
+
+// TaskAttachment matches pkg/models.TaskAttachment.
+type TaskAttachment struct {
+	ID      int64     `json:"id"`
+	TaskID  int64     `json:"task_id"`
+	File    *File     `json:"file,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// URL is not on the wire; commands fill it before printing.
+	URL string `json:"url,omitempty"`
+}
+
+// File matches the metadata of pkg/files.File.
+type File struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Mime string `json:"mime,omitempty"`
+	Size uint64 `json:"size"`
 }
 
 // TaskComment matches pkg/models/task_comments.TaskComment.

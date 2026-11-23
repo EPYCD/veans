@@ -18,13 +18,20 @@ package commands
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"code.vikunja.io/veans/internal/client"
 	"code.vikunja.io/veans/internal/config"
+	"code.vikunja.io/veans/internal/output"
 )
 
 func TestBackfillFrontendURL(t *testing.T) {
@@ -87,5 +94,102 @@ func TestBackfillFrontendURL_InfoFailsLeavesConfig(t *testing.T) {
 
 	if cfg.FrontendURL != "" {
 		t.Errorf("got %q, want empty so the next run retries", cfg.FrontendURL)
+	}
+}
+
+func TestBackfillFrontendURL_DoesNotFollowSymlinkOutOfRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"frontend_url":"https://vikunja.example.com/"}`))
+	}))
+	defer srv.Close()
+
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(base, "victim.yml")
+	original := "server: " + srv.URL + "\nproject_id: 1\n"
+	if err := os.WriteFile(victim, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(repo, config.Filename)
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime{cfg: cfg, client: client.New(srv.URL, "")}
+
+	rt.backfillFrontendURL(context.Background())
+
+	if buf, _ := os.ReadFile(victim); string(buf) != original {
+		t.Fatalf("backfill wrote through the symlink: %q", buf)
+	}
+}
+
+func TestResolveTaskID_BareNumberNotFoundExplainsIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"total_pages":1}`))
+	}))
+	t.Cleanup(srv.Close)
+	rt := newTestRuntime(srv.URL)
+	rt.cfg.ProjectIdentifier = "CL"
+
+	_, err := rt.resolveTaskID(context.Background(), "25787")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != output.CodeNotFound {
+		t.Fatalf("want NOT_FOUND, got %v", err)
+	}
+	for _, want := range []string{"CL-25787", "project index", "--id 25787"} {
+		if !strings.Contains(oe.Message, want) {
+			t.Errorf("message %q lacks %q", oe.Message, want)
+		}
+	}
+}
+
+func TestTaskID_ByIDChecksProject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		project := 7
+		if r.URL.Path == "/api/v2/tasks/2" {
+			project = 8
+		}
+		_, _ = w.Write(fmt.Appendf(nil, `{"id":1,"project_id":%d}`, project))
+	}))
+	t.Cleanup(srv.Close)
+	rt := newTestRuntime(srv.URL)
+
+	if id, err := rt.taskID(context.Background(), nil, 1); err != nil || id != 1 {
+		t.Fatalf("own project: id=%d err=%v", id, err)
+	}
+	if _, err := rt.taskID(context.Background(), nil, 2); err == nil {
+		t.Fatal("task from another project should be rejected")
+	}
+}
+
+func TestAddTaskIDFlag_Args(t *testing.T) {
+	cases := []struct {
+		args    []string
+		wantErr bool
+	}{
+		{[]string{"SF-1"}, false},
+		{[]string{"--id", "25787"}, false},
+		{[]string{"SF-1", "--id", "25787"}, true},
+		{nil, true},
+		{[]string{"--id", "0"}, true},
+	}
+	for _, tc := range cases {
+		cmd := &cobra.Command{Use: "x", RunE: func(*cobra.Command, []string) error { return nil }}
+		var id int64
+		cmd.Args = addTaskIDFlag(cmd, &id)
+		cmd.SetArgs(tc.args)
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		if err := cmd.Execute(); (err != nil) != tc.wantErr {
+			t.Errorf("%v: err=%v, wantErr=%v", tc.args, err, tc.wantErr)
+		}
 	}
 }

@@ -81,10 +81,13 @@ without breaking sessions in unrelated repos.
 
 1. Authenticates as you. Default is OAuth 2.0 Authorization Code + PKCE
    against Vikunja's built-in authorization server (Vikunja 2.3+ — no
-   client registration needed). veans prints an authorize URL; you open
-   it in your browser, sign in, and paste the resulting
-   `vikunja-veans-cli://callback?code=...` URL back into the CLI. The
-   browser will fail to open the custom scheme — that's expected; the
+   client registration needed). veans opens the authorize URL in your
+   browser and catches the redirect on a loopback port.
+
+   On a machine without a browser (e.g. over SSH), open the printed URL
+   on any machine, sign in, and paste the
+   `http://127.0.0.1:NNN/callback?code=...` URL the browser ends up on back
+   into the CLI. The page itself fails to load, which is expected; the
    address bar still has what we need.
 
    Alternative auth modes:
@@ -115,10 +118,10 @@ veans init                     OAuth/login → create bot → mint token → wri
 veans prime                    emit system prompt for agents (silent if no .veans.yml)
 veans list                     filtered list (--ready, --mine, --branch, --filter, --status); emits JSON
 veans show <id>                view a task (JSON)
-veans create "title"           --description, --label, --status, --priority, --parent, --blocked-by
+veans create "title"           --description, --label, --status, --priority, --parent, --blocked-by, --attach
 veans update <id>              --status, --title, --priority, --label-add/remove,
                                --description, --description-replace-old/new, --description-append,
-                               --comment, --reason, --if-unchanged-since
+                               --comment, --reason, --if-unchanged-since, --attach
 veans claim <id>               assign the bot, move to In Progress, tag with current branch label, lease paths_owned
                                (no label when on the default branch; --branch names one explicitly)
 veans ready                    ready queue with reasons (assigned / blocked / lease_conflict)
@@ -197,10 +200,22 @@ Resolved in order on every command:
 
 1. **OS keychain** (macOS Keychain, Windows Credential Manager,
    libsecret/gnome-keyring on Linux), via `github.com/zalando/go-keyring`.
-2. **`VEANS_TOKEN`** env var (read-only). Optionally pin to a server with
-   `VEANS_SERVER`. Intended for CI / containers.
+2. **`VEANS_TOKEN`** env var (read-only). Intended for CI / containers.
 3. **`~/.config/veans/credentials.yml`** (mode 0600) — automatic fallback
-   when the keychain is unavailable. Honors `XDG_CONFIG_HOME`.
+   when the keychain is unavailable.
+
+Set `VEANS_NO_KEYRING=1` to skip the keychain entirely.
+
+## Trusted servers
+
+`.veans.yml` is checked into the repo, so veans only talks to its `server`
+once you trust it. `veans init` trusts the server you typed. Any other
+command run in a terminal shows the server's origin and asks once; the
+answer is stored in `~/.config/veans/trusted.json`.
+
+Without a terminal (agent hooks, CI) veans never asks: it refuses to send
+credentials, and `veans prime` renders without project data. In CI, set
+`VEANS_SERVER` to the server URL to declare it trusted.
 
 ## Mage targets
 
@@ -244,10 +259,16 @@ through to its file backend.
 | `in-progress` | In Progress    | false     | `veans claim` / `update -s in-progress`  |
 | `in-review`   | In Review      | false     | the agent, when work is finished         |
 | `completed`   | Done           | true      | the merge hook when the PR lands, or a human |
-| `scrapped`    | Scrapped       | true      | the agent, with `--reason`               |
+| `scrapped`    | Scrapped       | false     | the agent, with `--reason`               |
 
 The agent never moves tasks to `completed` itself — it parks them in
 `In Review`, and merging the PR closes them (see *Merge hook* below).
+
+`scrapped` is not `done`: the board ties the done flag to the Done bucket.
+`veans update -s scrapped` releases the task's path leases itself, and
+Marshal counts a task in the Scrapped bucket as closed. The server's ready
+queue does not: a task blocked by a scrapped one stays blocked until the
+relation is removed.
 
 ## Claiming is atomic
 
@@ -417,9 +438,8 @@ marshal mcp                    agent tools over stdio
 
 ## Out of scope (for now)
 
-- OAuth 2.0 device flow (RFC 8628) — would let SSH'd / headless setups
-  authenticate without a browser-on-the-same-machine; not implemented
-  upstream yet.
+- OAuth 2.0 device flow (RFC 8628) — would replace the headless
+  paste-back step; not implemented upstream yet.
 - Project-scoped API tokens — Vikunja doesn't ship them yet. The
   credential schema's `scope` field is forward-compatible for when it does.
 - Auto-installing hook snippets. We print them; you paste them.

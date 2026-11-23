@@ -21,14 +21,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
+	"code.vikunja.io/veans/internal/auth"
 	"code.vikunja.io/veans/internal/client"
 	"code.vikunja.io/veans/internal/config"
 	"code.vikunja.io/veans/internal/credentials"
 	"code.vikunja.io/veans/internal/output"
+	"code.vikunja.io/veans/internal/trust"
 )
 
 // runtime bundles the artifacts every non-init command needs: parsed config,
@@ -53,7 +59,14 @@ func loadRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := credentials.Default()
+	return newRuntime(ctx, cfg, defaultGate(auth.NewStdPrompter()), credentials.Default())
+}
+
+func newRuntime(ctx context.Context, cfg *config.Config, gate *trust.Gate, store credentials.Store) (*runtime, error) {
+	// Before store.Get: VEANS_TOKEN matches any server.
+	if err := gate.Check(cfg.Server); err != nil {
+		return nil, err
+	}
 	tok, err := store.Get(cfg.Server, cfg.Bot.Username)
 	if err != nil {
 		return nil, output.Wrap(output.CodeAuth, err,
@@ -75,6 +88,18 @@ func loadRuntime(ctx context.Context) (*runtime, error) {
 	return rt, nil
 }
 
+// nil without a terminal, so the trust gate fails closed for hooks, agents and CI.
+func interactive(p *auth.StdPrompter) trust.Prompter {
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
+		return p
+	}
+	return nil
+}
+
+func defaultGate(p *auth.StdPrompter) *trust.Gate {
+	return trust.Default(interactive(p))
+}
+
 // backfillFrontendURL migrates configs written before frontend_url existed.
 // Best-effort: on failure TaskURL falls back to Server and the next run retries.
 func (r *runtime) backfillFrontendURL(ctx context.Context) {
@@ -85,19 +110,44 @@ func (r *runtime) backfillFrontendURL(ctx context.Context) {
 		return
 	}
 	r.cfg.FrontendURL = cmp.Or(info.FrontendURL, r.cfg.Server)
-	_ = r.cfg.SaveAs(r.cfg.Path())
+	_ = r.cfg.Save()
 }
 
-// withURLs sets URL on tasks and their related tasks for agent output.
-func (r *runtime) withURLs(tasks ...*client.Task) {
-	for _, t := range tasks {
-		t.URL = r.cfg.TaskURL(t.ID)
-		for _, related := range t.RelatedTasks {
-			for _, task := range related {
-				task.URL = r.cfg.TaskURL(task.ID)
-			}
+// addTaskIDFlag registers --id and returns the Args validator that requires
+// exactly one of the positional ref and --id.
+func addTaskIDFlag(cmd *cobra.Command, id *int64) cobra.PositionalArgs {
+	cmd.Flags().Int64Var(id, "id", 0,
+		"numeric task id (as in veans api paths and relations) instead of PROJ-NN / #NN / NN")
+	return func(cmd *cobra.Command, args []string) error {
+		hasID := cmd.Flags().Changed("id")
+		switch {
+		case hasID && len(args) > 0:
+			return output.New(output.CodeValidation, "pass a task reference or --id, not both")
+		case !hasID && len(args) != 1:
+			return output.New(output.CodeValidation, "expected one task reference (PROJ-NN, #NN, NN) or --id <task id>")
+		case hasID && *id <= 0:
+			return output.New(output.CodeValidation, "--id must be a positive task id")
 		}
+		return nil
 	}
+}
+
+// taskID resolves the command's task from its positional ref or --id. A task
+// from another project is rejected, like a PROJ-NN with the wrong prefix.
+func (r *runtime) taskID(ctx context.Context, args []string, id int64) (int64, error) {
+	if len(args) > 0 {
+		return r.resolveTaskID(ctx, args[0])
+	}
+	t, err := r.client.GetTask(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if t.ProjectID != r.cfg.ProjectID {
+		return 0, output.New(output.CodeValidation,
+			"task %d belongs to project %d, but this repo's .veans.yml uses project %d",
+			id, t.ProjectID, r.cfg.ProjectID)
+	}
+	return id, nil
 }
 
 // resolveTaskID accepts PROJ-NN, #NN, or a bare integer and returns the
@@ -121,7 +171,14 @@ func (r *runtime) resolveTaskID(ctx context.Context, raw string) (int64, error) 
 
 	// Bare integer — treat as task index in the configured project.
 	if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
-		return r.lookupByIndex(ctx, n)
+		id, err := r.lookupByIndex(ctx, n)
+		var oe *output.Error
+		if errors.As(err, &oe) && oe.Code == output.CodeNotFound {
+			return 0, output.Wrap(output.CodeNotFound, err,
+				"%s (a bare number is read as the project index, not the numeric task id; show, update and claim take the task id via --id %d)",
+				oe.Message, n)
+		}
+		return id, err
 	}
 
 	// PROJ-NN form

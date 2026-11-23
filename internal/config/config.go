@@ -118,6 +118,12 @@ func (c *Config) TaskURL(id int64) string {
 	return strings.TrimRight(base, "/") + "/tasks/" + strconv.FormatInt(id, 10)
 }
 
+// AttachmentURL is the image src the web editor recognizes and loads with the
+// viewer's auth; the raw endpoint needs auth, so any other form renders broken.
+func (c *Config) AttachmentURL(taskID, attachmentID int64) string {
+	return fmt.Sprintf("%s/api/v2/tasks/%d/attachments/%d", strings.TrimRight(c.Server, "/"), taskID, attachmentID)
+}
+
 // Find walks upward from cwd looking for .veans.yml. Returns ErrNotFound if
 // none is reachable.
 func Find(start string) (string, error) {
@@ -204,6 +210,31 @@ func (c *Config) SaveAs(path string) error {
 		return err
 	}
 	return os.WriteFile(path, buf, 0o644)
+}
+
+func (c *Config) SaveInRoot(root *os.Root, rel string) error {
+	buf, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return err
+	}
+	if err := root.WriteFile(rel, buf, 0o644); err != nil {
+		return err
+	}
+	c.path = filepath.Join(root.Name(), rel)
+	return nil
+}
+
+// os.Root so a repo-shipped .veans.yml symlink can't redirect the write.
+func (c *Config) Save() error {
+	root, err := os.OpenRoot(filepath.Dir(c.path))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return c.SaveInRoot(root, filepath.Base(c.path))
 }
 
 // RepoRoot returns the root of the git repo containing `start` (defaulting

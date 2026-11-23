@@ -36,13 +36,13 @@ func serverRoutes() map[string]RouteGroup {
 	}
 	return map[string]RouteGroup{
 		"tasks": group("read_one", "read_all", "create", "update", "position", "read",
-			"update_bulk", "claim", "scope", "scope_get", "scope_put", "scope_delete",
-			"leases", "leases_delete", "leases_heartbeat", "receipts", "receipts_post",
-			"lag", "lag_put", "lag_delete"),
+			"update_bulk", "claim", "scope", "scope_update", "scope_delete",
+			"leases", "leases_delete", "leases_heartbeat", "receipts", "receipts_create",
+			"lag", "lag_update", "lag_delete", "attachments_preview"),
 		"projects": group("read_one", "read_all", "tasks_by-index", "views_buckets",
-			"views_buckets_put", "views_buckets_post", "views_buckets_delete",
-			"views_buckets_tasks", "leases", "views_readiness", "scope_check", "plan",
-			"agents", "webhooks", "webhooks_get"),
+			"views_buckets_create", "views_buckets_update", "views_buckets_delete",
+			"views_buckets_tasks", "views_buckets_tasks_update", "leases", "views_readiness",
+			"scope_check", "plan", "plan_create", "agents", "webhooks", "webhooks_get"),
 		"projects_views":  group("read_one", "read_all"),
 		"labels":          group("read_one", "read_all", "create", "update", "delete"),
 		"tasks_comments":  group("read_one", "read_all", "create", "update", "delete"),
@@ -89,12 +89,12 @@ func TestGrantsCoverBranchLag(t *testing.T) {
 		t.Errorf("the CI token must be able to read lag: %v", ci["tasks"])
 	}
 	// It has no business writing one; that is Marshal's job.
-	if slices.Contains(ci["tasks"], "lag_put") || slices.Contains(ci["tasks"], "lag_delete") {
+	if slices.Contains(ci["tasks"], "lag_update") || slices.Contains(ci["tasks"], "lag_delete") {
 		t.Errorf("the CI token must not write lag: %v", ci["tasks"])
 	}
 
 	bot := PermissionsForBot(serverRoutes())
-	for _, want := range []string{"lag", "lag_put", "lag_delete"} {
+	for _, want := range []string{"lag", "lag_update", "lag_delete"} {
 		if !slices.Contains(bot["tasks"], want) {
 			t.Errorf("the worker token needs %q: %v", want, bot["tasks"])
 		}
@@ -106,7 +106,7 @@ func TestGrantsCoverBranchLag(t *testing.T) {
 // work, write scopes or hold leases.
 func TestPermissionsForCIStaysNarrow(t *testing.T) {
 	perms := PermissionsForCI(serverRoutes())
-	for _, forbidden := range []string{"claim", "scope_put", "scope_delete", "leases_delete", "create"} {
+	for _, forbidden := range []string{"claim", "scope_update", "scope_delete", "leases_delete", "create"} {
 		if slices.Contains(perms["tasks"], forbidden) {
 			t.Errorf("the CI token must not be able to %q: %v", forbidden, perms["tasks"])
 		}
@@ -131,5 +131,42 @@ func TestPickPermissionsDropsWhatTheServerLacks(t *testing.T) {
 	}
 	if _, has := got["labels"]; has {
 		t.Errorf("a group the server does not have must be dropped entirely: %v", got)
+	}
+}
+
+// TestGrantsKeepWorkingAcrossTheKeyRename: servers before GHSA-j5v7-qcwp-5g32
+// named non-CRUD writes by registration order (lag_put, plan for the POST,
+// views_buckets_tasks for the move), later ones by action. A bot minted
+// against either must still be able to write lag, move tasks and post
+// receipts, or the next mint fails as a silent 401.
+func TestGrantsKeepWorkingAcrossTheKeyRename(t *testing.T) {
+	legacy := serverRoutes()
+	legacy["tasks"] = RouteGroup{"lag": {}, "lag_put": {}, "lag_delete": {}, "scope_put": {}, "receipts": {}, "receipts_post": {}}
+	legacy["projects"] = RouteGroup{"views_buckets_post": {}, "views_buckets_put": {}, "views_buckets_tasks": {}, "views_buckets_tasks_get": {}, "plan": {}, "plan_get": {}}
+
+	for name, tc := range map[string]struct {
+		routes          map[string]RouteGroup
+		lagWrite, move  string
+		receipt, create string
+	}{
+		"current": {serverRoutes(), "lag_update", "views_buckets_tasks_update", "receipts_create", "plan_create"},
+		"legacy":  {legacy, "lag_put", "views_buckets_tasks", "receipts_post", "plan"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bot := PermissionsForBot(tc.routes)
+			if !slices.Contains(bot["tasks"], tc.lagWrite) {
+				t.Errorf("worker cannot write lag: %v", bot["tasks"])
+			}
+			if !slices.Contains(bot["projects"], tc.create) {
+				t.Errorf("worker cannot create a plan: %v", bot["projects"])
+			}
+			ci := PermissionsForCI(tc.routes)
+			if !slices.Contains(ci["projects"], tc.move) {
+				t.Errorf("CI cannot move a task to review: %v", ci["projects"])
+			}
+			if !slices.Contains(ci["tasks"], tc.receipt) {
+				t.Errorf("CI cannot post a receipt: %v", ci["tasks"])
+			}
+		})
 	}
 }
